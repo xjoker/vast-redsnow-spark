@@ -15,7 +15,7 @@ ENV TORCH_CUDA_ARCH_LIST=12.1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl openssh-server sudo xz-utils \
+ && apt-get install -y --no-install-recommends ca-certificates curl openssh-server sudo \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd \
  && sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
@@ -24,18 +24,22 @@ RUN apt-get update \
  && printf 'tunnel ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/tunnel \
  && chmod 440 /etc/sudoers.d/tunnel
 
-COPY licenses/easytier-v2.6.4-LICENSE licenses/GPL-3.0.txt /tmp/licenses/
-RUN mkdir -p /opt/easytier /usr/share/licenses/easytier \
- && curl -fsSL -o /tmp/easytier.tar.gz "https://github.com/EasyTier/EasyTier/releases/download/v${EASYTIER_VERSION}/easytier-linux-aarch64-v${EASYTIER_VERSION}.tar.gz" \
- && echo "${EASYTIER_SHA256}  /tmp/easytier.tar.gz" | sha256sum -c - \
- && tar -xzf /tmp/easytier.tar.gz -C /opt/easytier --strip-components=1 easytier-linux-aarch64/easytier-core easytier-linux-aarch64/easytier-cli \
- && rm /tmp/easytier.tar.gz \
- && cp /tmp/licenses/easytier-v2.6.4-LICENSE /usr/share/licenses/easytier/LICENSE \
- && cp /tmp/licenses/GPL-3.0.txt /usr/share/licenses/easytier/GPL-3.0.txt \
- && rm -rf /tmp/licenses \
- && printf 'https://github.com/EasyTier/EasyTier/tree/v%s\n' "${EASYTIER_VERSION}" > /usr/share/licenses/easytier/SOURCE \
- && ln -s /opt/easytier/easytier-core /usr/local/bin/easytier-core \
- && ln -s /opt/easytier/easytier-cli /usr/local/bin/easytier-cli
+COPY install_easytier.py /tmp/install_easytier.py
+COPY licenses/easytier-v2.6.4-LICENSE /usr/share/licenses/easytier/LICENSE
+COPY licenses/GPL-3.0.txt /usr/share/licenses/easytier/GPL-3.0.txt
+RUN curl -fsSL -o /tmp/easytier.zip \
+      "https://github.com/EasyTier/EasyTier/releases/download/v${EASYTIER_VERSION}/easytier-linux-aarch64-v${EASYTIER_VERSION}.zip" \
+ && echo "${EASYTIER_SHA256}  /tmp/easytier.zip" | sha256sum -c - \
+ && python3 /tmp/install_easytier.py /tmp/easytier.zip /usr/local/bin \
+ && rm -f /tmp/easytier.zip /tmp/install_easytier.py \
+ && printf '%s\n' \
+      "easytier-core easytier-cli ${EASYTIER_VERSION}" \
+      "unmodified binaries from https://github.com/EasyTier/EasyTier/releases/tag/v${EASYTIER_VERSION}" \
+      "corresponding source: https://github.com/EasyTier/EasyTier/tree/v${EASYTIER_VERSION}" \
+      "zip sha256 ${EASYTIER_SHA256}" \
+      > /usr/share/licenses/easytier/SOURCE \
+ && easytier-core --version \
+ && easytier-cli --version
 
 COPY --from=kernels /wheels/ /tmp/wheels/
 RUN torch_before="$(python3 -c 'import torch; print(torch.__version__)')" \
