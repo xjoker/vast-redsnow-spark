@@ -33,13 +33,27 @@ SSH 主机密钥在容器第一次启动时生成，不写进镜像。
 
 版本号是当天 UTC 的 `YYYYMMDD.N`。当天第一发是 `.1`，同一天再发才递增。推送镜像只用这个 tag，不用 `latest`。GPUtw 拒绝 `latest`。
 
-推到 `main` 只跑测试。发布要在 Actions 里手动运行「发布镜像」。它先看内核镜像上的 exllamav3 提交和基础镜像摘要，有变化才在 `ubuntu-24.04-arm` 上重建 `ghcr.io/<owner>/redsnow-kernels:<exllamav3 提交>`。应用镜像从这份内核镜像拷贝 wheel，不再在应用构建里编译。然后核对 `VERSION` 的日期是今天，用 `--no-cache` 推到 `ghcr.io/<owner>/redsnow-exl3:<VERSION>`，并打上 `v<VERSION>`。基础镜像 `nvcr.io/nvidia/pytorch:26.07-py3` 按摘要钉死，构建不需要 NGC 密钥。
+推到 `main` 只跑测试。发布要在 Actions 里手动运行「发布镜像」。它先看内核镜像上的 exllamav3 提交和基础镜像摘要，有变化才在 `ubuntu-24.04-arm` 上重建 `ghcr.io/<owner>/redsnow-kernels:<exllamav3 提交>`。应用镜像从这份内核镜像拷贝 wheel，不再在应用构建里编译。然后核对 `VERSION` 的日期是今天，用 `--no-cache` 推到 `ghcr.io/<owner>/redsnow-exl3:<VERSION>`，并打上 `v<VERSION>`。应用镜像的所有层（包括基础镜像的层）都重压成 zstd，主机首次拉取时解压更快；拉取端需要 Docker 23 或更新。基础镜像 `nvcr.io/nvidia/pytorch:26.07-py3` 按摘要钉死，构建不需要 NGC 密钥。
 
 ## 部署
 
-两个平台都用这份镜像自己的入口。启动参数留空。镜像 `EXPOSE 22` 和 `8898`，Vast 会按 `EXPOSE` 自动映射，不必在模板里再加一遍。不要映射 `8899`。
+镜像入口是 `/opt/redsnow/entrypoint.sh`，启动参数留空。镜像 `EXPOSE 22` 和 `8898`，另外从 NVIDIA 基础镜像继承了 `6006`、`8888`（没有服务在听）。不要映射 `8899`。
 
-Vast 模板选 docker ENTRYPOINT。SSH 和 Jupyter 模式会换掉镜像入口，自己的 sshd 和推理都不会起来。Vast 注入的 `SSH_PUBLIC_KEY` 写给 root，root 不能用密码登录。外部端口是随机的，启动日志里的 `Vast SSH` 和 `Vast API` 用的是 `PUBLIC_IPADDR` 和 `VAST_TCP_PORT_*`。
+Vast 模板选 SSH（直连），不要选 docker ENTRYPOINT。GB10 主机上 ENTRYPOINT 模式由 Vast 拼出的 docker 命令出错，报 `unknown flag --runtime`，镜像都不会拉。SSH 模式不执行镜像入口，所以把入口写进 On-start：
+
+```bash
+setsid nohup /opt/redsnow/entrypoint.sh > /var/log/redsnow.log 2>&1 < /dev/null &
+```
+
+Ports 加 `8898`。环境变量照常填，On-start 能读到。启动日志在 `/var/log/redsnow.log`。入口发现 Vast 的 sshd 已在运行，只让它重读配置，不再自己起。Vast 注入的 `SSH_PUBLIC_KEY` 写给 root，root 不能用密码登录。外部端口是随机的，启动日志里的 `Vast SSH` 和 `Vast API` 用的是 `PUBLIC_IPADDR` 和 `VAST_TCP_PORT_*`。
+
+个别 GB10 主机在 SSH 模式下停在 `docker_build() error writing dockerfile`，换成 `ubuntu:24.04` 也一样，是主机的问题，换一台。
+
+GPUtw 照旧用镜像自己的入口。
+
+SSH 保活：sshd 每 30 秒发一次探测，连续 10 次没有回应才断开。Vast 的 SSH 模式登录后会自动进 tmux，断线重连回到同一个会话。客户端用直连 `ssh -p <VAST_TCP_PORT_22> root@<PUBLIC_IPADDR> -o ServerAliveInterval=30`，不要经过 `sshN.vast.ai` 代理。
+
+看机器状态用镜像里的 `nv-monitor`（GB10 专用，统一内存下仍能显示应用实际占用和页缓存，另有 GPU 使用率、功耗、温度、时钟和 GPU 进程），以及 `btop`、`htop`、`ncdu`。GB10 上 `nvidia-smi` 的显存一栏是 N/A。要无界面采样可以用 `nv-monitor -n -l /tmp/gpu.csv -i 1000`。
 
 GPUtw 用自订映像，`sshEnabled` 打开，不要开 Web UI。平台要求容器自己听 22，入口会起 sshd。`customImage.env` 最多 32 个。不要自己填 `PUBLIC_KEY`、`GATEWAY_KEY`、`NVIDIA_VISIBLE_DEVICES`、`NVIDIA_DRIVER_CAPABILITIES`，平台会拒绝。
 
@@ -59,7 +73,7 @@ GPUtw 用自订映像，`sshEnabled` 打开，不要开 Web UI。平台要求容
 
 日志出现 `Native API listening` 后才能调用。加载约 105GB 权重需要大约一分钟，前提是页缓存已经让出来、切分没有超过当时的空闲显存。
 
-`GPU_SPLIT_GB` 留空时用上游 `serve.sh` 的 `112`。加载前丢一次页缓存，加载过程中每 2 秒再丢，直到日志出现 `Native API listening`。容器里通常写不了 `/proc/sys/vm/drop_caches`，这时切分仍然是 112。显式写一个更小的切分才覆盖。空闲显存比切分少 2 GiB 以上时，加载会失败。
+`GPU_SPLIT_GB` 留空时用上游 `serve.sh` 的 `112`。加载前丢一次页缓存，加载过程中每 2 秒再丢，直到日志出现 `Native API listening`。容器里通常写不了 `/proc/sys/vm/drop_caches`。刚下载完的权重会占约 88 GiB 页缓存，CUDA 读到的空闲只剩约 40 GiB。镜像默认 `EXL3_UMA=1`，exllamav3 改用 `MemAvailable` 和 cgroup 余量判断，页缓存会被回收，所以新下载后可以直接加载；系统保留默认 8 GiB（`EXL3_UMA_RESERVE_MB`）。设 `EXL3_UMA=0` 会退回 CUDA 空闲显存检查，这种情况下空闲显存比切分少 2 GiB 以上就会加载失败。
 
 默认上下文 `262144`。提示词加上一页余量（256）之后没有输出空间时，服务返回 400，入口不会裁提示词。客户端要在 `prompt_tokens` 达到 `CACHE_SIZE - 256` 之前自己压缩。
 

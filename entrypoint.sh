@@ -322,7 +322,8 @@ start_sshd_daemon() {
     return 0
   fi
   if command -v pgrep >/dev/null 2>&1 && pgrep -x sshd >/dev/null 2>&1; then
-    pkill -HUP -x sshd || true
+    # 只给最早的监听进程发 HUP。会话进程也叫 sshd，一起 HUP 会断掉已连上的 SSH。
+    pkill -HUP -o -x sshd || true
     log "sshd 已在运行，已重新加载。现在可以连 22。"
     return 0
   fi
@@ -551,7 +552,8 @@ main() {
   if [[ -n "$warning" ]]; then
     log "warn: ${warning}"
   fi
-  if (( free_gib < gs + 2 )); then
+  # EXL3_UMA=1 时 exllamav3 按 MemAvailable 算余量，页缓存会被回收，这里读到的空闲偏低不代表会失败。
+  if [[ "${EXL3_UMA:-}" != 1 ]] && (( free_gib < gs + 2 )); then
     log "warn: 空闲 ${free_gib} GiB，上游 serve.sh 仍用 -gs ${gs}。页缓存占满时这次加载会失败。"
   fi
   log "GPU_SPLIT_GB=${gs} CACHE_SIZE=${CACHE_SIZE} 空闲显存约 ${free_gib} GiB"

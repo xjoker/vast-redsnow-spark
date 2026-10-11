@@ -7,12 +7,15 @@ FROM --platform=linux/arm64 ${BASE_IMAGE}
 ARG SERVER_REF=b96fac226d9689c9e574f9b1b491c01d5340030d
 ARG EASYTIER_VERSION=2.6.4
 ARG EASYTIER_SHA256=f533ec25a7ea714e09f645615012200278058525795cc3bb690ff011aec1a70f
+ARG NV_MONITOR_VERSION=1.14.0
+ARG NV_MONITOR_SHA256=d778d2b2db377b7aa52a8ce5119d97592f9e0731ccdde03da63ea37241205f1c
 ENV TORCH_CUDA_ARCH_LIST=12.1 \
     DEBIAN_FRONTEND=noninteractive \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
     PIP_INDEX_URL=https://pypi.org/simple \
     HF_ENDPOINT=https://huggingface.co \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    EXL3_UMA=1
 
 COPY normalize_apt_sources.py /tmp/normalize_apt_sources.py
 RUN python3 /tmp/normalize_apt_sources.py /etc/apt/sources.list /etc/apt/sources.list.d \
@@ -20,8 +23,10 @@ RUN python3 /tmp/normalize_apt_sources.py /etc/apt/sources.list /etc/apt/sources
  && rm -f /etc/pip.conf /etc/xdg/pip/pip.conf /root/.pip/pip.conf /root/.config/pip/pip.conf \
  && apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl openssh-server iproute2 sudo \
+      btop htop tmux ncdu \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd \
+ && printf 'ClientAliveInterval 30\nClientAliveCountMax 10\n' > /etc/ssh/sshd_config.d/10-keepalive.conf \
  && sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
  && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config \
  && useradd --create-home --shell /bin/bash --user-group tunnel \
@@ -45,6 +50,14 @@ RUN curl -fsSL -o /tmp/easytier.zip \
  && easytier-core --version \
  && easytier-cli --version
 
+# GB10 统一内存下 nvidia-smi 的显存是 N/A。nv-monitor 按 MemAvailable 和页缓存分开算，另有 GPU 功耗、温度、时钟；-n -l 可无界面写 CSV。
+COPY licenses/nv-monitor-v1.14.0-LICENSE /usr/share/licenses/nv-monitor/LICENSE
+RUN curl -fsSL -o /usr/local/bin/nv-monitor \
+      "https://github.com/wentbackward/nv-monitor/releases/download/v${NV_MONITOR_VERSION}/nv-monitor-linux-arm64" \
+ && echo "${NV_MONITOR_SHA256}  /usr/local/bin/nv-monitor" | sha256sum -c - \
+ && chmod 755 /usr/local/bin/nv-monitor \
+ && nv-monitor -v
+
 COPY --from=kernels /wheels/ /tmp/wheels/
 RUN torch_before="$(python3 -c 'import torch; print(torch.__version__)')" \
  && pip install --no-cache-dir --index-url https://pypi.org/simple --no-deps /tmp/wheels/exllamav3-*.whl \
@@ -57,8 +70,13 @@ RUN torch_before="$(python3 -c 'import torch; print(torch.__version__)')" \
  && rm -rf /tmp/wheels \
  && python3 -c "import exllamav3, exllamav3_ext, transformers; print(transformers.__version__)"
 
+# server.patch：图片输入、developer 角色、JSON response_format、强制 tool_choice、reasoning_effort 开思考、
+# generation_config 采样默认值、OpenAI 标准响应字段。只对钉死的 SERVER_REF 生效，换提交要重做补丁。
+COPY server.patch /tmp/server.patch
 RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spark.git /tmp/redsnow \
  && git -C /tmp/redsnow checkout --detach "${SERVER_REF}" \
+ && git -C /tmp/redsnow apply /tmp/server.patch \
+ && rm -f /tmp/server.patch \
  && mkdir -p /opt/redsnow/server /usr/share/licenses/redsnow-server \
  && cp /tmp/redsnow/server/serve_glm.py /tmp/redsnow/server/protocol.py /tmp/redsnow/server/glm_protocol.py /tmp/redsnow/server/worker.py /opt/redsnow/server/ \
  && cp /tmp/redsnow/LICENSE /usr/share/licenses/redsnow-server/LICENSE \

@@ -120,7 +120,8 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
-          push: true
+          # 基础镜像的层也重压成 zstd：主机拉取时逐层单核解压，gzip 是首次启动最慢的一步。拉取端要 Docker 23+。
+          outputs: type=image,push=true,compression=zstd,force-compression=true,oci-mediatypes=true
           no-cache: true
           platforms: linux/arm64
           provenance: false

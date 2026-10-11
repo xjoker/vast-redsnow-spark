@@ -1,0 +1,277 @@
+diff --git a/server/protocol.py b/server/protocol.py
+index e8dd153..2f9f79e 100644
+--- a/server/protocol.py
++++ b/server/protocol.py
+@@ -164,16 +164,33 @@ def normalize_messages(messages):
+             raise APIError("Each message must be an object")
+         msg = copy.deepcopy(original)
+         role = msg.get("role")
++        if role == "developer":
++            # OpenAI 新版把 system 改名为 developer；模板只认 system。
++            role = msg["role"] = "system"
+         if role not in ("system", "user", "assistant", "tool"):
+             raise APIError("Unsupported message role")
+         content = msg.get("content")
+         if content is None:
+             content = ""
+         if isinstance(content, list):
+-            if any(not isinstance(p, dict) or p.get("type") != "text" or not isinstance(p.get("text"), str) for p in content):
+-                raise APIError("This native endpoint supports text content only")
+-            content = "".join(p["text"] for p in content)
+-        if not isinstance(content, str):
++            parts = []
++            for p in content:
++                if isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str):
++                    parts.append({"type": "text", "text": p["text"]})
++                elif isinstance(p, dict) and p.get("type") == "image_url" and role in ("user", "tool"):
++                    url = p.get("image_url")
++                    url = url.get("url") if isinstance(url, dict) else url
++                    if not isinstance(url, str) or not url:
++                        raise APIError("image_url.url must be a nonempty string")
++                    # 模板把 image/image_url 渲染成 <|begin_of_image|><|image|><|end_of_image|>，服务层按顺序换成视觉嵌入。
++                    parts.append({"type": "image_url", "image_url": {"url": url}})
++                else:
++                    raise APIError("Content parts must be text, or image_url in user/tool messages")
++            if any(p["type"] != "text" for p in parts):
++                content = parts
++            else:
++                content = "".join(p["text"] for p in parts)
++        if not isinstance(content, (str, list)):
+             raise APIError("Message content must be text")
+         msg["content"] = content
+         if role == "system":
+@@ -246,8 +263,20 @@ def normalize_request(body, served_name):
+         if body.get(key):
+             raise APIError(f"{key} is unsupported")
+     fmt = body.get("response_format")
+-    if fmt is not None and (not isinstance(fmt, dict) or fmt.get("type") != "text"):
+-        raise APIError("Only response_format.type=text is supported")
++    fmt_type = "text" if fmt is None else (fmt.get("type") if isinstance(fmt, dict) else None)
++    if fmt_type not in ("text", "json_object", "json_schema"):
++        raise APIError("response_format.type must be text, json_object or json_schema")
++    # 没有受限解码库，JSON 模式只能靠系统指令引导，不保证一定合法。
++    format_instruction = ""
++    if fmt_type == "json_object":
++        format_instruction = "Respond with a single valid JSON object only, with no surrounding text or code fences."
++    elif fmt_type == "json_schema":
++        schema = fmt.get("json_schema")
++        schema = schema.get("schema") if isinstance(schema, dict) else None
++        if not isinstance(schema, dict):
++            raise APIError("response_format.json_schema.schema must be an object")
++        format_instruction = ("Respond with a single valid JSON value that conforms to this JSON Schema, "
++                              "with no surrounding text or code fences:\n" + json.dumps(schema, ensure_ascii=False))
+     for key in ("stream", "parallel_tool_calls", "ignore_eos"):
+         if key in body and not isinstance(body[key], bool):
+             raise APIError(f"{key} must be boolean")
+@@ -284,6 +313,7 @@ def normalize_request(body, served_name):
+         instruction = instruction or "For this turn, respond with at least one of the available function calls."
+     if choice == "none":
+         specs = {}
++    instruction = "\n\n".join(x for x in (instruction, format_instruction) if x)
+     if instruction:
+         if messages[0]["role"] == "system":
+             messages[0]["content"] += "\n\n" + instruction
+@@ -300,6 +330,9 @@ def normalize_request(body, served_name):
+             raise APIError(f"{key} must be boolean")
+     if "reasoning_effort" in body:
+         kwargs["reasoning_effort"] = body["reasoning_effort"]
++        # 模板只认 enable_thinking。按 OpenAI 语义，给了思考档位就开思考，none/minimal 除外。
++        if "enable_thinking" not in kwargs and isinstance(body["reasoning_effort"], str):
++            kwargs["enable_thinking"] = body["reasoning_effort"] not in ("none", "minimal")
+     max_tokens = body.get("max_completion_tokens")
+     if max_tokens is None:
+         max_tokens = body.get("max_tokens")
+@@ -324,15 +357,21 @@ def normalize_request(body, served_name):
+                    body.get("parallel_tool_calls", True), max_tokens, body.get("stream", False))
+ 
+ 
+-def sampling_options(body):
+-    """Keep original greedy defaults; honor explicit per-request sampling."""
++def sampling_options(body, defaults=None):
++    """Explicit per-request sampling wins, then the model's generation_config (as vLLM does),
++    then the original greedy defaults."""
++    defaults = defaults or {}
+     def pick(key, default):
+         value = body.get(key)
++        if value is None:
++            value = defaults.get(key)
+         return default if value is None else value
+     temp = pick("temperature", 0.0)
++    # 上游公布的采样是 0.7 / 0.95 / min_p 0；用到模型默认值时 min_p 也按 0。
++    min_p_default = 0.0 if temp <= 0 or "temperature" in defaults else 0.08
+     return dict(temperature=temp, top_p=pick("top_p", 1.0),
+                 top_k=pick("top_k", 1 if temp <= 0 else 0),
+-                min_p=pick("min_p", 0.0 if temp <= 0 else 0.08),
++                min_p=pick("min_p", min_p_default),
+                 rep_p=pick("repetition_penalty", 1.0), pres_p=pick("presence_penalty", 0.0),
+                 freq_p=pick("frequency_penalty", 0.0), rep_sustain_range=1024,
+                 rep_decay_range=1024, temp_last=True, adaptive_target=1.0, adaptive_decay=0.9)
+diff --git a/server/serve_glm.py b/server/serve_glm.py
+index 4945f6d..dfc50fc 100755
+--- a/server/serve_glm.py
++++ b/server/serve_glm.py
+@@ -34,6 +34,43 @@ from protocol import APIError, dumps, loads, normalize_request, sampling_options
+ from glm_protocol import GlmOutputParser as OutputParser, render_prompt, token_budget
+ from worker import GenerationWorker
+ 
++# 模型自带 chat_template.jinja 为每个 image/image_url 部件输出的占位串。
++IMAGE_MARKER = "<|begin_of_image|><|image|><|end_of_image|>"
++
++
++def load_image(url, max_bytes):
++    """data: URI 或 http(s) URL -> PIL RGB 图。其他协议拒绝。"""
++    import base64
++    import io
++    import urllib.request
++    from PIL import Image
++    if url.startswith("data:"):
++        head, sep, data = url.partition(",")
++        if not sep or ";base64" not in head:
++            raise APIError("image_url data URI must be base64")
++        if len(data) > max_bytes * 4 // 3 + 4:
++            raise APIError("Image exceeds the size limit")
++        try:
++            raw = base64.b64decode(data, validate=True)
++        except ValueError as exc:
++            raise APIError("Invalid base64 image data") from exc
++    elif url.startswith(("http://", "https://")):
++        try:
++            with urllib.request.urlopen(url, timeout=20) as r:
++                raw = r.read(max_bytes + 1)
++        except Exception as exc:
++            raise APIError(f"Could not fetch image_url: {exc}") from exc
++        if len(raw) > max_bytes:
++            raise APIError("Image exceeds the size limit")
++    else:
++        raise APIError("image_url must be a data: URI or an http(s) URL")
++    try:
++        image = Image.open(io.BytesIO(raw))
++        image.load()
++    except Exception as exc:
++        raise APIError(f"Unreadable image: {exc}") from exc
++    return image.convert("RGB")
++
+ 
+ def verified_template(hf, model_dir, expected=None):
+     # Whitespace-normalized on purpose: this pack's chat_template.jinja carries one extra
+@@ -79,12 +116,36 @@ class Application:
+         # Native encode() changes tokenizer flags. Serialize only CPU prompt
+         # preparation, never the full generation or HTTP stream.
+         self.prompt_lock = threading.Lock()
++        self.started = int(time.time())
++        self.vision, self.vision_lock, self.image_max_bytes = None, threading.Lock(), 20 << 20
+ 
+     def prepare(self, body):
+         request = normalize_request(body, self.served_name)
++        urls = [p["image_url"]["url"] for m in request.messages if isinstance(m.get("content"), list)
++                for p in m["content"] if p["type"] == "image_url"]
++        if urls and self.vision is None:
++            raise APIError("Image input is disabled on this server (VISION=0)")
++        images = [load_image(u, self.image_max_bytes) for u in urls]
+         with self.prompt_lock:
+             prompt, thinking = render_prompt(self.hf, request)
+-            ids = self.tokenizer.encode(prompt, add_bos=False, encode_special_tokens=True)
++            # tool_choice=required/指定函数：只靠系统指令模型会不调用。预填调用开头，模型只能接着写参数。
++            forced = ""
++            if request.choice == "required" and request.specs:
++                forced = "<tool_call>" + (next(iter(request.specs)) if len(request.specs) == 1 else "")
++                if thinking:
++                    prompt, thinking = prompt + "</think>", False
++                prompt += forced
++            embeddings = []
++            if images:
++                pieces = prompt.split(IMAGE_MARKER)
++                if len(pieces) != len(images) + 1:
++                    raise APIError("Image placeholders in the rendered prompt do not match the images")
++                with self.vision_lock, self.vision_ctx():
++                    embeddings = [self.vision.get_image_embeddings(tokenizer=self.tokenizer, image=img)
++                                  for img in images]
++                prompt = pieces[0] + "".join(e.text_alias + rest for e, rest in zip(embeddings, pieces[1:]))
++            ids = self.tokenizer.encode(prompt, add_bos=False, encode_special_tokens=True,
++                                        embeddings=embeddings or None)
+         count = int(ids.shape[-1])
+         max_new = token_budget(count, request.max_tokens, self.context_limit)
+         stops = [] if body.get("ignore_eos") else list(self.stop_ids)
+@@ -92,7 +153,11 @@ class Application:
+         stops.extend([additional] if isinstance(additional, str) else additional)
+         kwargs = dict(input_ids=ids, max_new_tokens=max_new, sampler=self.sampler_factory(body),
+                       stop_conditions=stops, seed=body.get("seed"), decode_special_tokens=True)
+-        return request, OutputParser(request, thinking), count, kwargs
++        if embeddings:
++            kwargs["embeddings"] = embeddings
++        parser = OutputParser(request, thinking)
++        parser.feed(forced)
++        return request, parser, count, kwargs
+ 
+ 
+ class Handler(BaseHTTPRequestHandler):
+@@ -129,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
+                            {"status": "healthy" if state["healthy"] else "unhealthy", **state})
+         elif path in ("/models", "/v1/models"):
+             self.send_json(200, {"object": "list", "data": [{"id": self.app.served_name,
+-                "object": "model", "owned_by": "vcruz305-exllamav3",
++                "object": "model", "created": self.app.started, "owned_by": "vcruz305-exllamav3",
+                 "max_model_len": self.app.context_limit, "cache_size": self.app.cache_size,
+                 "max_active_requests": self.app.worker.max_active,
+                 "chat_template_sha256": self.app.template_hash}]})
+@@ -160,11 +225,12 @@ class Handler(BaseHTTPRequestHandler):
+             request, parser, prompt_tokens, kwargs = self.app.prepare(body)
+             ticket = self.app.worker.submit(**kwargs)
+             cid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
+-            base = {"id": cid, "created": created, "model": self.app.served_name}
++            base = {"id": cid, "created": created, "model": self.app.served_name,
++                    "system_fingerprint": "fp_" + self.app.template_hash[:12]}
+ 
+             def frame(delta, finish=None):
+                 self.sse({**base, "object": "chat.completion.chunk", "choices": [
+-                    {"index": 0, "delta": delta, "finish_reason": finish}]})
++                    {"index": 0, "delta": delta, "logprobs": None, "finish_reason": finish}]})
+ 
+             if request.stream:
+                 self.send_response(200)
+@@ -211,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
+                     self.sse_done()
+                 else:
+                     self.send_json(200, {**base, "object": "chat.completion", "choices": [
+-                        {"index": 0, "message": msg, "finish_reason": finish}], "usage": stats})
++                        {"index": 0, "message": msg, "logprobs": None, "finish_reason": finish}], "usage": stats})
+                 print(dumps({"request_id": cid, "finish_reason": finish, "usage": stats}), flush=True)
+                 break
+         except (BrokenPipeError, ConnectionResetError, socket.timeout):
+@@ -285,6 +351,9 @@ def main():
+     parser.add_argument("--max-pending-requests", type=int, default=32)
+     parser.add_argument("--request-timeout", type=float, default=1800)
+     parser.add_argument("--expected-template-sha256")
++    parser.add_argument("--vision", action="store_true", help="Load the vision tower and accept image_url parts")
++    parser.add_argument("--max-image-tokens", type=int, default=None,
++                        help="Per-image token budget (default: processor_config max_image_tokens)")
+     args = parser.parse_args()
+     if not (1 <= args.max_active_requests <= args.autosplit_max_batch_size):
+         parser.error("max-active-requests must be positive and <= autosplit_max_batch_size")
+@@ -316,13 +385,25 @@ def main():
+         stops.append(name)
+     print(f"Stop conditions: {stops}", flush=True)
+ 
++    gen_path = Path(args.model_dir) / "generation_config.json"
++    gen_defaults = json.loads(gen_path.read_text()) if gen_path.exists() else {}
++    gen_defaults = {k: gen_defaults[k] for k in ("temperature", "top_p", "top_k", "min_p") if k in gen_defaults}
++    print(f"Sampling defaults from generation_config: {gen_defaults}", flush=True)
++
+     def sampler(body):
+-        return ComboSampler(**sampling_options(body))
++        return ComboSampler(**sampling_options(body, gen_defaults))
+ 
+     worker = GenerationWorker(gen, Job, args.max_active_requests, args.max_pending_requests,
+                               inference_context=torch.inference_mode)
+     app = Application(hf, tokenizer, worker, sampler, args.served_model_name, args.max_model_len,
+                       args.cache_size, digest, stops, args.request_timeout)
++    if args.vision:
++        from exllamav3 import Model
++        if args.max_image_tokens:
++            config.vision_pp.max_image_tokens = args.max_image_tokens
++        app.vision, app.vision_ctx = Model.from_config(config, component="vision"), torch.inference_mode
++        app.vision.load(progressbar=False)
++        print(f"Vision tower loaded; max_image_tokens={config.vision_pp.max_image_tokens}", flush=True)
+     server = make_server(app, args.host, args.port)
+     print(f"Native API listening {args.host}:{args.port}; max_active={args.max_active_requests}", flush=True)
+     try:
