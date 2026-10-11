@@ -10,6 +10,7 @@ log() {
 DOWNLOAD_MODEL_PY="${DOWNLOAD_MODEL_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/download_model.py}"
 MODEL_REPO_DEFAULT="vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw"
 MODEL_REVISION_DEFAULT="071adefe6c1c8de379d76977985811b7d4385454"
+SERVED_MODEL_NAME="RED-SNOW-5.3-FLASH-EXL3-2.49"
 
 have_tun() {
   [[ -c /dev/net/tun ]]
@@ -561,29 +562,63 @@ log_banner() {
   log "========================================"
 }
 
-# 没有的项不输出。鉴权行固定带字面量 <API_TOKEN>，真实 token 不进日志。
-access_lines() {
-  local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}" url=""
-  local ip="${PUBLIC_IPADDR:-}" ssh_ext="${VAST_TCP_PORT_22:-}"
-  local api_name="VAST_TCP_PORT_${PROXY_PORT:-8898}" api_ext=""
+# 接入说明整段复制给 AI，所以地址和示例都填好，只留 <API_TOKEN> 给用户补。
+# 隧道优先于 Vast 直连，因为隧道是 HTTPS，Vast 映射是 HTTP 明文。鉴权行带字面量，真实 token 不进日志。没有的项不输出。
+connect_lines() {
+  local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}" tunnel_url=""
+  local ip="${PUBLIC_IPADDR:-}" api_name="VAST_TCP_PORT_${PROXY_PORT:-8898}" api_ext=""
+  local vast="" base="" tunnel=0 caps body
   if [[ -s "$url_file" ]]; then
-    url="$(head -n 1 "$url_file")"
-  fi
-  if [[ -n "$url" ]]; then
-    echo "公网  ${url}"
-  elif [[ "${CF_TUNNEL:-}" == 1 && -n "${CF_TUNNEL_TOKEN:-}" ]]; then
-    echo "公网  Cloudflare 具名隧道，主机名见 Cloudflare 控制台"
+    tunnel_url="$(head -n 1 "$url_file")"
   fi
   if [[ -v "$api_name" ]]; then
     api_ext="${!api_name}"
   fi
   if [[ -n "$ip" && -n "$api_ext" ]]; then
-    echo "Vast API  http://${ip}:${api_ext}"
+    vast="http://${ip}:${api_ext}/v1"
   fi
+  if [[ -n "$tunnel_url" ]]; then
+    base="${tunnel_url}/v1"
+    tunnel=1
+  elif [[ "${CF_TUNNEL:-}" == 1 && -n "${CF_TUNNEL_TOKEN:-}" ]]; then
+    base="https://<你在 Cloudflare 配置的主机名>/v1"
+    tunnel=1
+  elif [[ -n "$vast" ]]; then
+    base="$vast"
+  else
+    base="http://<服务器地址>:${PROXY_PORT:-8898}/v1"
+  fi
+  caps="文本、工具调用（tools/tool_choice）、response_format json_object/json_schema"
+  if [[ "${VISION:-}" == 1 ]]; then
+    caps+="、图片（image_url，data:image base64 或 http(s) URL）"
+  fi
+  body='{"model":"'"${SERVED_MODEL_NAME}"'","stream":true,"messages":[{"role":"user","content":"你好"}]}'
+  echo "协议      OpenAI Chat Completions 兼容"
+  echo "Base URL  ${base}"
+  if [[ "$tunnel" == 1 && -n "$vast" ]]; then
+    echo "备用 URL  ${vast}（Vast 直连，HTTP 明文）"
+  fi
+  echo "模型      ${SERVED_MODEL_NAME}"
+  echo "鉴权      请求头 Authorization: Bearer <API_TOKEN>"
+  echo "上下文    ${CACHE_SIZE} tok，输入加 max_tokens 超过会返回 400"
+  echo "建议      max_tokens 不超过 32000，对话超过 $((CACHE_SIZE - 32768)) tok 就压缩或截断"
+  if [[ "$tunnel" == 1 ]]; then
+    echo "串流      必须 stream: true，非串流超过 100 秒会被 Cloudflare 返回 524"
+  else
+    echo "串流      推荐 stream: true"
+  fi
+  echo "能力      ${caps}"
+  echo "不支持    n>1、logprobs"
+  echo "接口      GET /v1/models，POST /v1/chat/completions"
+  echo "示例      curl -N ${base}/chat/completions -H 'Authorization: Bearer <API_TOKEN>' -H 'Content-Type: application/json' -d '${body}'"
+}
+
+# 就绪横幅只保留 Vast SSH 一行，其它访问信息已由 connect_lines 给出。
+access_lines() {
+  local ip="${PUBLIC_IPADDR:-}" ssh_ext="${VAST_TCP_PORT_22:-}"
   if [[ -n "$ip" && -n "$ssh_ext" ]]; then
     echo "Vast SSH  ssh -p ${ssh_ext} root@${ip}（root 只认账号公钥，密码登录用隧道用户）"
   fi
-  echo "鉴权  请求头 Authorization: Bearer <API_TOKEN>"
 }
 
 json_num() {
@@ -634,11 +669,11 @@ format_serve_output() {
         ;;
       *"Native API listening"*)
         printf '%s\n' "$line" >&2
-        rows=()
+        rows=("加载用时 $((SECONDS - start_at)) 秒")
         while IFS= read -r row; do
           rows+=("$row")
-        done < <(access_lines)
-        log_banner "模型就绪" "加载用时 $((SECONDS - start_at)) 秒" "上下文 ${CACHE_SIZE:-未设置}" "${rows[@]}"
+        done < <(connect_lines; access_lines)
+        log_banner "模型就绪：接入信息（整段复制给 AI，只需补 API_TOKEN）" "${rows[@]}"
         ;;
       *)
         printf '%s\n' "$line" >&2
@@ -818,7 +853,7 @@ main() {
     --max-model-len "${CACHE_SIZE}" \
     --host 127.0.0.1 \
     --port "${SERVE_PORT}" \
-    --served-model-name RED-SNOW-5.3-FLASH-EXL3-2.49 \
+    --served-model-name "${SERVED_MODEL_NAME}" \
     --request-timeout 7200 \
     "${VISION_ARGS[@]}" >>"$serve_log" 2>&1 &
   local serve_pid=$!

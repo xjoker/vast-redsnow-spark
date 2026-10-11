@@ -415,14 +415,39 @@ grep -q 'GET /v1/models' <<<"$health_out" || fail "upstream access kept"
 tunnel_dir=$(mktemp -d)
 printf 'https://a-b.trycloudflare.com\n' >"$tunnel_dir/url"
 ready_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
-  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 CF_TUNNEL=1 CF_TUNNEL_TOKEN= \
+  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 VISION=1 CF_TUNNEL=1 CF_TUNNEL_TOKEN= \
+     PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
      PROXY_PORT=8898 TUNNEL_URL_FILE="$tunnel_dir/url" format_serve_output) 2>&1)
-grep -q '模型就绪' <<<"$ready_out" || fail "ready banner"
-grep -q 'https://a-b.trycloudflare.com' <<<"$ready_out" || fail "ready url"
-grep -q '上下文 262144' <<<"$ready_out" || fail "ready context"
+grep -q '模型就绪：接入信息' <<<"$ready_out" || fail "ready banner"
+grep -q 'Base URL  https://a-b.trycloudflare.com/v1' <<<"$ready_out" || fail "ready base url"
+grep -q '备用 URL  http://1.2.3.4:33526/v1' <<<"$ready_out" || fail "ready vast backup"
+grep -q '模型      RED-SNOW-5.3-FLASH-EXL3-2.49' <<<"$ready_out" || fail "ready model"
+grep -q '上下文    262144 tok' <<<"$ready_out" || fail "ready context"
+grep -q '229376' <<<"$ready_out" || fail "ready max_tokens threshold"
+grep -q '必须 stream: true' <<<"$ready_out" || fail "ready tunnel stream"
+grep -q '图片' <<<"$ready_out" || fail "ready vision"
+grep -q 'curl -N https://a-b.trycloudflare.com/v1/chat/completions' <<<"$ready_out" || fail "ready curl example"
 grep -q 'Authorization: Bearer <API_TOKEN>' <<<"$ready_out" || fail "ready auth line"
 if grep -q 'secret-xyz' <<<"$ready_out"; then fail "api token leaked into log"; fi
 rm -rf "$tunnel_dir"
+
+vast_dir=$(mktemp -d)
+vast_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
+  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 CF_TUNNEL=0 \
+     PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
+     PROXY_PORT=8898 TUNNEL_URL_FILE="$vast_dir/none" format_serve_output) 2>&1)
+grep -q 'Base URL  http://1.2.3.4:33526/v1' <<<"$vast_out" || fail "vast base url"
+grep -q '推荐 stream: true' <<<"$vast_out" || fail "vast stream hint"
+if grep -q '备用 URL' <<<"$vast_out"; then fail "vast-only should have no backup"; fi
+vision_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
+  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 VISION=0 CF_TUNNEL=0 \
+     PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
+     PROXY_PORT=8898 TUNNEL_URL_FILE="$vast_dir/none" format_serve_output) 2>&1)
+if grep -q '图片' <<<"$vision_out"; then fail "vision off should not advertise images"; fi
+rm -rf "$vast_dir"
+
+[[ "$(grep -c 'RED-SNOW-5.3-FLASH-EXL3-2.49' entrypoint.sh)" == 1 ]] || fail "served model name defined once"
+grep -q -- '--served-model-name "${SERVED_MODEL_NAME}"' entrypoint.sh || fail "served model name flag"
 
 stub_dir=$(mktemp -d)
 cat >"$stub_dir/nvidia-smi" <<'STUB'
