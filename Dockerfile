@@ -1,6 +1,6 @@
 # GPUtw DGX Spark（GB10，linux/arm64，sm_121）。权重不进镜像。
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
-ARG KERNELS_IMAGE=ghcr.io/xjoker/redsnow-kernels:7c1636fead6b6d802dc3ebf0e7ef02c4e76e9c2f
+ARG KERNELS_IMAGE=ghcr.io/xjoker/redsnow-kernels:aa86ccd701004bef36b54a8931178975a7143edb
 FROM ${KERNELS_IMAGE} AS kernels
 FROM --platform=linux/arm64 ${BASE_IMAGE}
 
@@ -108,7 +108,7 @@ COPY auth_proxy.py download_model.py /opt/redsnow/
 COPY entrypoint.sh /opt/redsnow/entrypoint.sh
 RUN chmod 755 /opt/redsnow/entrypoint.sh /opt/redsnow/auth_proxy.py /opt/redsnow/download_model.py
 
-ARG IMAGE_VERSION=20261011.10
+ARG IMAGE_VERSION=20261012.1
 ENV IMAGE_VERSION=${IMAGE_VERSION}
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=${GIT_COMMIT}

@@ -14,7 +14,7 @@
 
 - 不提交密钥、实例地址、token；不 force push；`git push`、`docker push`、删实例、删文件前先问用户。
 - 版本号 `YYYYMMDD.N`，bump 前先跑 `date -u`。
-- 不换 vLLM / llama.cpp；权重不进镜像；exllamav3 钉 `7c1636fe…`（vcruz305 fork）。
+- 不换 vLLM / llama.cpp；权重不进镜像；exllamav3 钉 `aa86ccd7…`（vcruz305 fork）。
 - 上游服务层（Weschera 仓库，`SERVER_REF=b96fac22…`）不直接改文件，改动全放 `server.patch`，Dockerfile 在 clone 后 `git apply`，只动 `protocol.py`、`serve_glm.py` 和 `worker.py`。换 `SERVER_REF` 要重做补丁。
 - 仓库文档和注释用简体中文。
 

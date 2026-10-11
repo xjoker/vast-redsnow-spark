@@ -1,6 +1,6 @@
 # exllamav3 的 sm_121 内核。应用镜像只拷贝 wheel，不在这里以外编译。
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
-ARG EXL3_REF=7c1636fead6b6d802dc3ebf0e7ef02c4e76e9c2f
+ARG EXL3_REF=aa86ccd701004bef36b54a8931178975a7143edb
 
 FROM --platform=linux/arm64 ${BASE_IMAGE} AS build
 ARG EXL3_REF
