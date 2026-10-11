@@ -67,15 +67,52 @@ def test_download_passes_workers(tmp: Path):
 
 
 def test_download_failure(tmp: Path):
+    calls = {"n": 0}
+
     def boom(**_kwargs):
+        calls["n"] += 1
         raise RuntimeError("disk full")
 
     try:
         download_model.run_download("repo", "rev", tmp / "dest", 2, boom)
     except SystemExit as exc:
-        if exc.code == 1:
+        if exc.code == 1 and calls["n"] == 1:
             return
-    raise SystemExit("download failure should exit 1")
+    raise SystemExit("download failure should exit 1 without retry")
+
+
+def test_resume_after_reset(tmp: Path):
+    dest = tmp / "dest"
+    calls = {"n": 0}
+    slept = []
+
+    def fake(**kwargs):
+        calls["n"] += 1
+        (dest / "partial.bin").write_text("keep", encoding="utf-8")
+        if calls["n"] == 1:
+            raise ConnectionError("reset")
+        write_model(Path(kwargs["local_dir"]), shard=True)
+        assert kwargs["force_download"] is False
+
+    download_model.run_download("repo", "rev", dest, 4, fake, sleep=slept.append)
+    assert calls["n"] == 2
+    assert slept == [5]
+    assert (dest / "partial.bin").read_text(encoding="utf-8") == "keep"
+    assert download_model.is_complete(dest) is True
+
+
+def test_orphan_incomplete_removed(tmp: Path):
+    dest = tmp / "orphan"
+    (dest / ".hf-cache").mkdir(parents=True)
+    (dest / ".hf-cache" / "keep.incomplete").write_text("cache", encoding="utf-8")
+    (dest / "dead.incomplete").write_text("orphan", encoding="utf-8")
+
+    def fake(**kwargs):
+        write_model(Path(kwargs["local_dir"]), shard=True)
+
+    download_model.run_download("repo", "rev", dest, 2, fake)
+    assert (dest / ".hf-cache" / "keep.incomplete").read_text(encoding="utf-8") == "cache"
+    assert not (dest / "dead.incomplete").exists()
 
 
 if __name__ == "__main__":
@@ -88,4 +125,6 @@ if __name__ == "__main__":
         test_rejects_parent_segment(root)
         test_download_passes_workers(root)
         test_download_failure(root)
+        test_resume_after_reset(root)
+        test_orphan_incomplete_removed(root)
     print("download_model ok")

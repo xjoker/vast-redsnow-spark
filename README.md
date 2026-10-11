@@ -10,7 +10,7 @@ Vast.ai 和 GPUtw 上单台 DGX Spark（GB10，linux/arm64）的 RED-SNOW 推理
 
 把以后买的存储挂到 `/models`，文件就在这一层。平台盘不在这里时，用 `MODEL_DIR` 指向那块盘上的同一层目录，例如 GPUtw 的 `/vault/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw`，或 Vast 的 `/workspace/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw`。启动不会再去别的路径找。
 
-这个目录算完整，要同时有 `tokenizer_config.json`、`model.safetensors.index.json`，以及索引 `weight_map` 里的每个分片。齐全就直接加载。不齐全时，`MODEL_DOWNLOAD=1`（默认）把 `vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw` 的修订 `071adefe6c1c8de379d76977985811b7d4385454` 下载到这个目录，线程数是 `MODEL_DOWNLOAD_WORKERS`（默认 8）。默认路径 `/models` 必须是挂载点，否则不把约 97GiB 写进容器层。`MODEL_DOWNLOAD=0` 时就算目录是空的也不下载，不起推理，22 和认证代理继续，用来先测 SSH 和端口。
+这个目录算完整，要同时有 `tokenizer_config.json`、`model.safetensors.index.json`，以及索引 `weight_map` 里的每个分片。齐全就直接加载。不齐全时，`MODEL_DOWNLOAD=1`（默认）把 `vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw` 的修订 `071adefe6c1c8de379d76977985811b7d4385454` 下载到这个目录，线程数是 `MODEL_DOWNLOAD_WORKERS`（默认 8）。每个文件内部由 Xet 并发拉取。已完成的分片下次跳过；没下完的块写在同目录的 `.hf-cache`，中断后接着传。网络中断会退避重试，磁盘满了则停。默认路径 `/models` 必须是挂载点，否则不把约 97GiB 写进容器层。`MODEL_DOWNLOAD=0` 时就算目录是空的也不下载，不起推理，22 和认证代理继续，用来先测 SSH 和端口。
 
 运行时钉死两处提交：
 

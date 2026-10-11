@@ -56,7 +56,7 @@ RUN git clone https://github.com/vcruz305/exllamav3.git /opt/exllamav3 \
  && git -C /opt/exllamav3 checkout --detach "${EXL3_REF}" \
  && pip install --no-cache-dir --index-url https://pypi.org/simple -r /opt/exllamav3/requirements.txt \
  && pip install --no-cache-dir --index-url https://pypi.org/simple --no-build-isolation -e /opt/exllamav3 \
- && pip install --no-cache-dir --index-url https://pypi.org/simple "huggingface_hub>=0.32" jsonschema "transformers>=5.0" jinja2 \
+ && pip install --no-cache-dir --index-url https://pypi.org/simple "huggingface_hub[hf_xet]>=0.32" jsonschema "transformers>=5.0" jinja2 \
  && python -c "import exllamav3, exllamav3_ext, transformers; print(transformers.__version__)"
 
 RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spark.git /tmp/redsnow-src \

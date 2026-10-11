@@ -260,7 +260,7 @@ grep -q '/usr/share/licenses/redsnow-server/LICENSE' Dockerfile || fail "server 
 grep -q 'GNU LESSER GENERAL PUBLIC LICENSE' licenses/easytier-v2.6.4-LICENSE || fail "lgpl body"
 grep -q 'GNU GENERAL PUBLIC LICENSE' licenses/GPL-3.0.txt || fail "gpl body"
 grep -q 'download_model.py' Dockerfile || fail "download script in image"
-grep -q 'huggingface_hub>=0.32' Dockerfile || fail "hub pin"
+grep -q 'huggingface_hub\[hf_xet\]>=0.32' Dockerfile || fail "hub pin"
 grep -q '^EXPOSE 22 8898$' Dockerfile || fail "expose"
 grep -q 'useradd --create-home --shell /bin/bash --user-group tunnel' Dockerfile || fail "builtin user"
 grep -q 'tunnel ALL=(ALL) NOPASSWD:ALL' Dockerfile || fail "builtin sudo"
