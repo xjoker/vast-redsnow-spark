@@ -37,23 +37,35 @@ SSH 主机密钥在容器第一次启动时生成，不写进镜像。
 
 ## 部署
 
-镜像入口是 `/opt/redsnow/entrypoint.sh`，启动参数留空。镜像 `EXPOSE 22` 和 `8898`，另外从 NVIDIA 基础镜像继承了 `6006`、`8888`（没有服务在听）。不要映射 `8899`。
+镜像入口是 `/opt/redsnow/entrypoint.sh`，不需要启动参数，传了也只打一行日志后忽略。镜像 `EXPOSE 22` 和 `8898`，另外从 NVIDIA 基础镜像继承了 `6006`、`8888`（没有服务在听）。不要映射 `8899`。
 
-Vast 模板选 SSH（直连），不要选 docker ENTRYPOINT。GB10 主机上 ENTRYPOINT 模式由 Vast 拼出的 docker 命令出错，报 `unknown flag --runtime`，镜像都不会拉。SSH 模式不执行镜像入口，所以把入口写进 On-start：
+Vast 推荐 ENTRYPOINT 模式，用 CLI 建。之前用网页表单建 ENTRYPOINT 模式时报过 `unknown flag --runtime`，CLI 方式没出现。示例（占位符自行替换）：
+
+```bash
+vastai create instance <OFFER_ID> --image ghcr.io/xjoker/redsnow-exl3:<VERSION> --disk 150 \
+  --env "-e API_TOKEN=<API_TOKEN> -e MODEL_DIR=/workspace/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw -p 22:22 -p 8898:8898" \
+  --entrypoint /opt/redsnow/entrypoint.sh --args serve
+```
+
+- `--entrypoint` 和非空的 `--args` 都要带。不带 `--args` 时 CLI 默认建成 SSH 模式。`--args` 的内容入口会忽略。
+- `--env` 是整串 docker 风格参数，按空格切分，所以变量值里不能有空格。
+- 没挂存储时必须设 `MODEL_DIR`，否则 `/models` 不是挂载点，入口不下载、不起推理。
+- ENTRYPOINT 模式下 Vast 不注入 sshd，但会传 `SSH_PUBLIC_KEY`（账号 SSH Keys 里的公钥）。入口把它写给 root 并自己起 sshd。`vastai attach ssh` 加到单个实例的公钥不会进容器，要加到账号的 SSH Keys。root 只用公钥；隧道用户用 `SSH_PASSWORD` 登录。
+- 外部端口是随机的，启动日志里的 `Vast SSH` 和 `Vast API` 用的是 `PUBLIC_IPADDR` 和 `VAST_TCP_PORT_*`。
+- 镜像已在主机缓存时，容器约 20 秒进入 running。新机全流程实测：下载 97 GiB 约 6 分钟，加载约 3 分钟。
+- 重建（recycle）会清空容器，权重要重新下载。`vastai update instance` 后马上 recycle 可能仍用旧配置重建；先 `vastai show instance` 确认 image_uuid 和 extra_env 已更新，再 recycle。
+
+备选是 SSH 模式 + On-start。Vast 注入 sshd，入口由 On-start 启动：
 
 ```bash
 setsid nohup /opt/redsnow/entrypoint.sh > /var/log/redsnow.log 2>&1 < /dev/null &
 ```
 
-Ports 加 `8898`。环境变量照常填，On-start 能读到。启动日志在 `/var/log/redsnow.log`。入口发现 Vast 的 sshd 已在运行，只让它重读配置，不再自己起。Vast 注入的 `SSH_PUBLIC_KEY` 写给 root，root 不能用密码登录。外部端口是随机的，启动日志里的 `Vast SSH` 和 `Vast API` 用的是 `PUBLIC_IPADDR` 和 `VAST_TCP_PORT_*`。
-
-Vast 实例没挂存储时，环境变量要加 `MODEL_DIR=/workspace/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw`，否则 `/models` 不是挂载点，入口不下载、不起推理。重建（recycle）会清空容器，权重要重新下载。重建后 Vast 写入的 `/root/.ssh/authorized_keys` 属主是宿主 uid，sshd 会拒绝 root 公钥登录；入口启动时会把属主改回 root。
-
-个别 GB10 主机在 SSH 模式下停在 `docker_build() error writing dockerfile`，换成 `ubuntu:24.04` 也一样，是主机的问题，换一台。
-
-GPUtw 照旧用镜像自己的入口。
+Ports 加 `8898`。环境变量照常填，On-start 能读到。启动日志在 `/var/log/redsnow.log`。入口发现 Vast 的 sshd 已在运行，只让它重读配置，不再自己起。SSH 模式下 recycle 后，Vast 有时把 `/root/.ssh/authorized_keys` 写成宿主 uid（128:988），入口启动时会改回 root。个别 GB10 主机在 SSH 模式下停在 `docker_build() error writing dockerfile`，换 ubuntu 也一样，换一台主机。
 
 SSH 保活：sshd 每 30 秒发一次探测，连续 10 次没有回应才断开。Vast 的 SSH 模式登录后会自动进 tmux，断线重连回到同一个会话。客户端用直连 `ssh -p <VAST_TCP_PORT_22> root@<PUBLIC_IPADDR> -o ServerAliveInterval=30`，不要经过 `sshN.vast.ai` 代理。
+
+GPUtw 照旧用镜像自己的入口。
 
 看机器状态用镜像里的 `nv-monitor`（GB10 专用，统一内存下仍能显示应用实际占用和页缓存，另有 GPU 使用率、功耗、温度、时钟和 GPU 进程），以及 `btop`、`htop`、`ncdu`。GB10 上 `nvidia-smi` 的显存一栏是 N/A。要无界面采样可以用 `nv-monitor -n -l /tmp/gpu.csv -i 1000`。`dgxtop` 是 DGX Spark 用的终端监控，一屏看 GPU、CPU、内存、磁盘和网络，以及占用 GPU 的进程。
 
