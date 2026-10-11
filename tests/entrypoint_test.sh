@@ -252,6 +252,15 @@ done
   (main) >/dev/null 2>"$et_dir/max.err" || rc=$?
   [[ "$rc" -eq 1 ]] && grep -q 'MAX_ACTIVE_REQUESTS' "$et_dir/max.err"
 ) || fail "max active requests validation"
+(
+  # 私有模式取非法值，让 main 在警告之后立刻退出。
+  API_TOKEN=tok MAX_ACTIVE_REQUESTS=2 EASYTIER_PRIVATE_MODE=2
+  (main) >/dev/null 2>"$et_dir/slots.err" || true
+  grep -q 'warn: MAX_ACTIVE_REQUESTS=2 配 CACHE_SIZE=262144' "$et_dir/slots.err"
+  CACHE_SIZE=131072
+  (main) >/dev/null 2>"$et_dir/slots2.err" || true
+  ! grep -q 'warn: MAX_ACTIVE_REQUESTS' "$et_dir/slots2.err"
+) || fail "multi-slot cache warning"
 grep -q 'MAX_ACTIVE_REQUESTS="${MAX_ACTIVE_REQUESTS:-1}"' entrypoint.sh || fail "max active default"
 grep -q -- '--max-active-requests "${MAX_ACTIVE_REQUESTS}" -ambs "${MAX_ACTIVE_REQUESTS}"' entrypoint.sh || fail "max active serve args"
 if grep -Eq '[$][{]?ET_' entrypoint.sh; then fail "reads user ET_ variables"; fi

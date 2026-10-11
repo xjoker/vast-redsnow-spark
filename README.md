@@ -57,7 +57,7 @@ curl -N <BASE_URL>/chat/completions \
 | 路径 | `GET /v1/models`、`GET /v1/models/{id}`、`POST /v1/chat/completions`、`GET /health`（无 `/v1` 前缀的同名路径也可用） |
 | 模型名 | `RED-SNOW-5.3-FLASH-EXL3-2.49` |
 | 鉴权 | `Authorization: Bearer <API_TOKEN>`，所有路径都要，错误返回 401 |
-| 并发 | 同时只处理 1 个请求，其余排队 |
+| 并发 | 默认 1 个请求同时生成，其余排队；`MAX_ACTIVE_REQUESTS` 可调，见实测 |
 
 支持：
 
@@ -118,7 +118,7 @@ curl -N <BASE_URL>/chat/completions \
 | `GPU_SPLIT_GB` | 空，实际用 `112` | 显存切分（`-gs`），对齐上游 `serve.sh`；填了才覆盖 |
 | `CACHE_SIZE` | `262144` | KV 缓存和 `--max-model-len`（token）。KV 启动时一次分配，上下文变长不涨内存 |
 | `NUM_DRAFT_TOKENS` | `2` | MTP 草稿 token 数 |
-| `MAX_ACTIVE_REQUESTS` | `1` | 并发槽位数：同时生成的请求数，其余排队；正整数。`-ambs` 同值，加载时按它预留内存。默认 1；调大会多占内存，性能对比见实测（待补） |
+| `MAX_ACTIVE_REQUESTS` | `1` | 并发槽位数：同时生成的请求数，其余排队；正整数。`-ambs` 同值，加载时按它预留内存。多槽只改善短请求的排队等待，总吞吐不涨；大于 1 时配 `CACHE_SIZE=131072`，见实测 |
 | `VISION` | `1` | `1` 加载视觉塔，接受 `image_url`；`0` 省内存，带图请求返回 400 |
 | `MAX_IMAGE_TOKENS` | 空，处理器默认 8000 | 单图 token 上限，正整数；越大越吃统一内存 |
 | `PROXY_PORT` | `8898` | 认证代理端口，监听 `0.0.0.0` |
@@ -197,7 +197,22 @@ Ports 加 `8898`，环境变量照常填，日志在 `/var/log/redsnow.log`。�
 - 预填约 660 tok/s（GPU 跑满 96%），不随长度明显变化，首 token 随提示线性增长。
 - 前缀缓存有效：同一份约 9.4 万 token 文档，第二次起换问题或追问，首 token 约 0.8 s。
 - 解码：写代码 33–34 tok/s（MTP 接受率 0.86–0.89）；接近 25 万 token 时 19–26 tok/s。
-- 只有 1 个并发槽：4 个请求排队执行，总吞吐约 25 tok/s。
+- 并发槽（`MAX_ACTIVE_REQUESTS`）只换延迟分布，不换总吞吐，总吞吐一直在 24–31 tok/s：
+
+| 配置 | 场景 | 单请求解码 | 总吞吐 | 首 token | MemAvailable 最低 | 结果 |
+|---|---|---|---|---|---|---|
+| 1 槽，262K | 4 个 930 tok 请求 | 33 tok/s | 25.5 tok/s | 1.3 / 17 / 33 / 50 s（排队） | — | OK |
+| 2 槽，262K | 2×1K | 22–24 tok/s | 27 tok/s | 8–9 s | 8.0 GiB | OK |
+| 2 槽，262K | 2×32K | 24–25 tok/s | — | 101 s | 5.0 GiB | OK |
+| 2 槽，262K | 2×60K+3 图、2×128K | — | — | — | 4.5 GiB | CUDA OOM |
+| 4 槽，262K | 4×32K | — | — | — | — | CUDA OOM |
+| 4 槽，131K | 4×1K | 9–10 tok/s | 24–26 tok/s | 15–18 s | 7.7 GiB | OK |
+| 4 槽，131K | 4×32K | 9–10 tok/s | — | 190 s | 2.5 GiB | OK |
+| 4 槽，131K | 4×60K | 8–23 tok/s | — | 184 / 360 s（池子错开预填） | 2.1 GiB | OK |
+
+  - OOM 发生在多个长提示同时预填时。`CACHE_SIZE=131072` 时页池装不下的请求会等前面的释放，预填自然错开，所以 4×60K 也能过；262K 的池子允许它们一起预填，2×60K 起就超出进程约 104 GiB 的上限。
+  - OOM 只让当次请求返回 503 `out_of_memory`，其他请求和服务照常。
+  - 结论：单人用保持默认 1 槽、262K。多 Agent 同时调用、主要是短请求时，用 `MAX_ACTIVE_REQUESTS=4 CACHE_SIZE=131072`；这时可用上下文降到 131072，内存余量只剩约 2 GiB。多槽配大于 131072 的缓存，启动日志会给警告。
 - `NUM_DRAFT_TOKENS=3` 写代码快约 5%，但接受率降到 0.73–0.80，默认维持 2。预填 `chunk_size` 提到 8192 会让长提示失败（`Generator drained`），维持 4096。
 
 内存边界（`MAX_IMAGE_TOKENS` 默认 8000，cgroup `memory.events` 全程 oom=0）：
