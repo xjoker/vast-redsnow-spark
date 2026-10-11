@@ -88,8 +88,11 @@ RUN chmod 755 /opt/redsnow/entrypoint.sh /opt/redsnow/auth_proxy.py /opt/redsnow
 
 ARG IMAGE_VERSION=20261011.1
 ENV IMAGE_VERSION=${IMAGE_VERSION}
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
 LABEL org.opencontainers.image.title="redsnow-exl3" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
       org.opencontainers.image.source="https://github.com/xjoker/vast-redsnow-spark"
 WORKDIR /opt/redsnow
 EXPOSE 22 8898

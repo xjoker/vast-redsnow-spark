@@ -127,7 +127,9 @@ jobs:
           provenance: false
           sbom: false
           tags: ghcr.io/${{ github.repository_owner }}/redsnow-exl3:${{ steps.version.outputs.value }}
-          build-args: IMAGE_VERSION=${{ steps.version.outputs.value }}
+          build-args: |
+            IMAGE_VERSION=${{ steps.version.outputs.value }}
+            GIT_COMMIT=${{ github.sha }}
       - name: 打标签
         run: |
           version="${{ steps.version.outputs.value }}"

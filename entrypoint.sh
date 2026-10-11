@@ -392,6 +392,17 @@ split_warning() {
   fi
 }
 
+# 结果写 VISION_ARGS。MAX_IMAGE_TOKENS 留空时不传，由上游处理器决定默认值。
+vision_serve_args() {
+  VISION_ARGS=()
+  if [[ "$VISION" == 1 ]]; then
+    VISION_ARGS+=(--vision)
+  fi
+  if [[ -n "$MAX_IMAGE_TOKENS" ]]; then
+    VISION_ARGS+=(--max-image-tokens "$MAX_IMAGE_TOKENS")
+  fi
+}
+
 # 上游 serve.sh：加载前丢一次，加载过程中每 2 秒再丢，直到出现 Native API listening。
 # 必须在当前 shell 调用，结果写 DROPPER_PID。不能放进 $()，否则后台循环会随子 shell 退出。
 start_load_cache_dropper() {
@@ -490,13 +501,27 @@ main() {
   SERVE_PORT="${SERVE_PORT:-8899}"
   PROXY_PORT="${PROXY_PORT:-8898}"
   PROXY_TIMEOUT="${PROXY_TIMEOUT:-7200}"
+  VISION="${VISION:-1}"
+  MAX_IMAGE_TOKENS="${MAX_IMAGE_TOKENS:-}"
   MODEL_REPO="${MODEL_REPO:-$MODEL_REPO_DEFAULT}"
   MODEL_REVISION="${MODEL_REVISION:-$MODEL_REVISION_DEFAULT}"
   MODEL_DOWNLOAD="${MODEL_DOWNLOAD:-1}"
   MODEL_DOWNLOAD_WORKERS="${MODEL_DOWNLOAD_WORKERS:-8}"
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
-  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS}"
+  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-处理器默认}"
   log "模型目录 $(locked_model_dir) 仓库 ${MODEL_REPO} 修订 ${MODEL_REVISION}"
+
+  case "$VISION" in
+    0 | 1) ;;
+    *)
+      log "VISION 只能是 0 或 1，当前是 ${VISION}"
+      exit 1
+      ;;
+  esac
+  if [[ -n "$MAX_IMAGE_TOKENS" && ! "$MAX_IMAGE_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+    log "MAX_IMAGE_TOKENS 必须是正整数，当前是 ${MAX_IMAGE_TOKENS}"
+    exit 1
+  fi
 
   # 22 先起来。后面的下载和加载都不挡 SSH。
   install_ssh_pubkey "${SSH_PUBLIC_KEY:-}" /root/.ssh/authorized_keys
@@ -511,7 +536,8 @@ main() {
 
   publish_runtime_env /etc/environment \
     API_TOKEN CACHE_SIZE NUM_DRAFT_TOKENS PROXY_PORT SERVE_PORT PROXY_TIMEOUT \
-    MODEL_REPO MODEL_REVISION MODEL_DOWNLOAD MODEL_DOWNLOAD_WORKERS IMAGE_VERSION
+    MODEL_REPO MODEL_REVISION MODEL_DOWNLOAD MODEL_DOWNLOAD_WORKERS IMAGE_VERSION GIT_COMMIT \
+    VISION MAX_IMAGE_TOKENS
   export UPSTREAM="http://127.0.0.1:${SERVE_PORT}"
   export PROXY_PORT API_TOKEN PROXY_TIMEOUT
   start_auth_proxy 0.0.0.0
@@ -562,7 +588,8 @@ main() {
   publish_runtime_env /etc/environment GPU_SPLIT_GB
 
   serve_log="$(mktemp)"
-  log "启动推理，参数对齐上游 serve.sh：-m ${MODEL_DIR} -gs ${gs} --cache_size ${CACHE_SIZE} --cache_quant 4 --mtp --num_draft_tokens ${NUM_DRAFT_TOKENS} --max-model-len ${CACHE_SIZE} --port ${SERVE_PORT}"
+  vision_serve_args
+  log "启动推理，参数对齐上游 serve.sh：-m ${MODEL_DIR} -gs ${gs} --cache_size ${CACHE_SIZE} --cache_quant 4 --mtp --num_draft_tokens ${NUM_DRAFT_TOKENS} --max-model-len ${CACHE_SIZE} --port ${SERVE_PORT} ${VISION_ARGS[*]}"
   python3 /opt/redsnow/server/serve_glm.py \
     -m "${MODEL_DIR}" \
     -gs "${gs}" \
@@ -574,7 +601,8 @@ main() {
     --host 127.0.0.1 \
     --port "${SERVE_PORT}" \
     --served-model-name RED-SNOW-5.3-FLASH-EXL3-2.49 \
-    --request-timeout 7200 >>"$serve_log" 2>&1 &
+    --request-timeout 7200 \
+    "${VISION_ARGS[@]}" >>"$serve_log" 2>&1 &
   local serve_pid=$!
   tail -n +0 -F "$serve_log" >&2 &
   tail_pid=$!

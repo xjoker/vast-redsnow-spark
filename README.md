@@ -57,7 +57,7 @@ SSH 保活：sshd 每 30 秒发一次探测，连续 10 次没有回应才断开
 
 GPUtw 用自订映像，`sshEnabled` 打开，不要开 Web UI。平台要求容器自己听 22，入口会起 sshd。`customImage.env` 最多 32 个。不要自己填 `PUBLIC_KEY`、`GATEWAY_KEY`、`NVIDIA_VISIBLE_DEVICES`、`NVIDIA_DRIVER_CAPABILITIES`，平台会拒绝。
 
-可以写进表单的变量是 `.env.example` 里的 21 个。必填只有 `API_TOKEN`。EasyTier 和隧道用户都是填了才启动，留空就跳过。只测 SSH 和端口时设 `MODEL_DOWNLOAD=0`。其余有默认值，表单留空。密钥只放在部署表单里，不进镜像。
+可以写进表单的变量是 `.env.example` 里的 23 个。必填只有 `API_TOKEN`。EasyTier 和隧道用户都是填了才启动，留空就跳过。只测 SSH 和端口时设 `MODEL_DOWNLOAD=0`。其余有默认值，表单留空。密钥只放在部署表单里，不进镜像。
 
 构建时的 apt、pip、GitHub、Hugging Face 都用官方主机。国家代码和大陆镜像站会改回 `archive.ubuntu.com`、`ports.ubuntu.com`、`pypi.org`、`github.com`、`huggingface.co`。落到哪台边缘由这些服务自己解析，镜像里不写地区。
 
@@ -77,12 +77,80 @@ GPUtw 用自订映像，`sshEnabled` 打开，不要开 Web UI。平台要求容
 
 默认上下文 `262144`。提示词加上一页余量（256）之后没有输出空间时，服务返回 400，入口不会裁提示词。客户端要在 `prompt_tokens` 达到 `CACHE_SIZE - 256` 之前自己压缩。
 
+加载失败时先看空闲显存和 `GPU_SPLIT_GB`，不是先把上下文改成 131072。`TRITON_PTXAS_PATH` 必须指向认识 `sm_121a` 的 ptxas，镜像里默认是 `/usr/local/cuda/bin/ptxas`。NGC 26.07 这支 ptxas 是否认识 `sm_121a` 还没在这台镜像里跑过；不认识的话，加载会死在 `causal_conv1d_update`。
+
+## OpenAI 兼容与多模态
+
+接口是 `/v1/models` 和 `/v1/chat/completions`。流式和非流式都支持，流式时可以加 `stream_options.include_usage`。两个接口都要 `Authorization: Bearer <API_TOKEN>`。
+
+支持的内容：
+
+- 消息角色：system、developer（按 system 处理）、user、assistant、tool。
+- 工具调用，包括流式下的参数拼接。`tool_choice` 支持 auto、required 和指定函数。为 required 或指定函数时，服务预填函数名，模型一定会调用。
+- `stop`、`max_tokens`、`max_completion_tokens`。
+- `response_format` 支持 `json_object` 和 `json_schema`。这靠系统指令引导，**不保证**输出合法 JSON，没有受限解码。
+- 思考：请求带 `chat_template_kwargs.enable_thinking=true`，或带 `reasoning_effort`（`none`、`minimal` 除外）且没有显式给 `enable_thinking` 时开启。思考内容在 `reasoning_content`。默认不思考。
+- 采样参数没给时，用模型的 `generation_config.json`：temperature 0.7、top_p 0.95，min_p 为 0。
+
+图片：user 和 tool 消息里的 `image_url` 支持 data URI 和 http(s) 地址，单张上限 20 MiB。
+
+- 环境变量 `VISION`（默认 `1`）控制是否加载视觉部分。设为 `0` 时，带图请求返回 400。
+- `MAX_IMAGE_TOKENS` 留空时用处理器默认值 8000。
+- 模型卡说明视觉组件未做质量测试。实测一张 640×400 的文字截图，识别正确，约 5 秒。
+
+不支持的请求返回 400，不伪造结果：`n` 大于 1、`logprobs`。没有 `/v1/completions`、`/v1/responses`，也没有 `/v1/embeddings`（这不是嵌入模型）。
+
+用官方 openai Python SDK 跑过 17 项兼容检查，全部通过。
+
+## 接 opencode
+
+在 `~/.config/opencode/opencode.json` 里加 provider。`baseURL` 换成实际地址，`apiKey` 从环境变量 `API_TOKEN` 读取：
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "redsnow": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "RED-SNOW",
+      "options": { "baseURL": "http://<主机>:<8898 映射端口>/v1", "apiKey": "{env:API_TOKEN}" },
+      "models": {
+        "RED-SNOW-5.3-FLASH-EXL3-2.49": {
+          "name": "RED-SNOW 5.3 Flash",
+          "tool_call": true, "reasoning": true, "attachment": true,
+          "modalities": { "input": ["text", "image"], "output": ["text"] },
+          "limit": { "context": 262144, "output": 32768 }
+        }
+      }
+    }
+  },
+  "model": "redsnow/RED-SNOW-5.3-FLASH-EXL3-2.49"
+}
+```
+
+opencode 会把工具读到的图片放进一条新的 user 消息，不放在 tool 消息里。标题生成请求带 `reasoning_effort: low`，补丁之后会开思考。
+
+实测两轮写代码任务用时 52 s 和 19 s，测试全过；读图任务 29 s，结果正确。
+
 ## 实测对速度的含义
 
-解码大约 30 token/s。MTP 接受率高时能到 36，低时会掉到 18 附近。默认 `NUM_DRAFT_TOKENS=2`，没有新的测量就不要加大。
+数据来自 DGX Spark（GB10），`NUM_DRAFT_TOKENS=2`，thinking 关。
 
-预填到 64K 大约 6300 token/s，64K 的首 token 大约 10 秒。128K 及以上首 token 大约 100 秒，一直到 256K 都停在这个量级，不是按长度线性变长。要响应快，就把单次提示留在 64K 以内。256K 的 KV 大约 2.3 GiB，限制首 token 的是这段预填，不是显存装不下。
+| 提示 token | 首 token | 预填 tok/s | 大海捞针 |
+|---|---|---|---|
+| 12,144 | 21.9 s | 554 | OK |
+| 48,523 | 74.8 s | 648 | OK |
+| 99,047 | 148.5 s | 667 | OK |
+| 200,687 | 299.5 s | 670 | OK |
+| 249,761 | 378.4 s | 660 | OK |
 
-上次用 SSH 隧道量到的额外往返大约 0.2 秒，不改变解码速度。服务同一时间只处理一个请求。没配 EasyTier 时，客户端直接连服务器 IP 的 `8898`。
+- 预填在 GPU 跑满（96%）时约 660 tok/s。4.8 万 token 以上在 648–670 之间，1.2 万 token 时为 554。
+- 预填速度基本不随长度变化，所以首 token 随提示长度线性增长。25 万 token 约 6 分钟。提示越短，响应越快。
+- 前缀缓存有效。同一份约 9.4 万 token 的文档，第二次起换问题或多轮追问，首 token 约 0.8 s。
+- 解码：写代码 33–34 tok/s（MTP 接受率 0.86–0.89）。接近 25 万 token 时为 19–26 tok/s。
+- 服务同时只处理一个请求，并发会排队。4 个请求排队执行时，总吞吐约 25 tok/s。
 
-容器里通常写不了 `/proc/sys/vm/drop_caches`。加载失败时先看空闲显存和 `GPU_SPLIT_GB`，不是先把上下文改成 131072。`TRITON_PTXAS_PATH` 必须指向认识 `sm_121a` 的 ptxas，镜像里默认是 `/usr/local/cuda/bin/ptxas`。NGC 26.07 这支 ptxas 是否认识 `sm_121a` 还没在这台镜像里跑过；不认识的话，加载会死在 `causal_conv1d_update`。
+### 调参结论
+
+- `NUM_DRAFT_TOKENS=3`：写代码快约 5%，但 MTP 接受率从 0.86–0.89 降到 0.73–0.80。默认维持 2。
+- 预填 `chunk_size` 提到 8192 会让长提示请求失败（报 `Generator drained`）。维持 4096。

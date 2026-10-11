@@ -297,4 +297,34 @@ grep -q 'MAX_JOBS=2' Dockerfile.kernels || fail "kernel jobs"
 grep -q 'TORCH_CUDA_ARCH_LIST=12.1' Dockerfile.kernels || fail "kernel arch"
 if grep -q 'ubuntu-24.04-arm' .github/workflows/ci.yml; then fail "ci still builds on arm"; fi
 
+(
+  VISION=1 MAX_IMAGE_TOKENS=
+  vision_serve_args
+  [[ "${VISION_ARGS[*]}" == "--vision" ]] || fail "vision default"
+)
+(
+  VISION=0 MAX_IMAGE_TOKENS=
+  vision_serve_args
+  [[ "${#VISION_ARGS[@]}" -eq 0 ]] || fail "vision off"
+)
+(
+  VISION=1 MAX_IMAGE_TOKENS=4096
+  vision_serve_args
+  [[ "${VISION_ARGS[*]}" == "--vision --max-image-tokens 4096" ]] || fail "max image tokens"
+)
+(
+  API_TOKEN=tok VISION=maybe
+  rc=0
+  (main) >/tmp/redsnow-vision.out 2>/tmp/redsnow-vision.err || rc=$?
+  [[ "$rc" -eq 1 ]] || fail "bad VISION rc=$rc"
+  grep -q "VISION" /tmp/redsnow-vision.err || fail "bad VISION text"
+) || fail "vision flag"
+(
+  API_TOKEN=tok VISION=1 MAX_IMAGE_TOKENS=0
+  rc=0
+  (main) >/tmp/redsnow-vision.out 2>/tmp/redsnow-vision.err || rc=$?
+  [[ "$rc" -eq 1 ]] || fail "bad MAX_IMAGE_TOKENS rc=$rc"
+  grep -q "MAX_IMAGE_TOKENS" /tmp/redsnow-vision.err || fail "bad MAX_IMAGE_TOKENS text"
+) || fail "max image tokens validation"
+
 echo "entrypoint ok"

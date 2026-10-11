@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import sys
 import time
@@ -22,6 +23,7 @@ ALLOWED = {
     "/v1/chat/completions",
     "/chat/completions",
 }
+HEALTH_PATHS = {"/health", "/v1/health"}
 DROP_HEADERS = {
     "connection",
     "keep-alive",
@@ -41,6 +43,19 @@ def authorized(header: str) -> bool:
     if not TOKEN:
         return False
     return hmac.compare_digest(header, f"Bearer {TOKEN}")
+
+
+# 上游非 JSON 对象（或非 2xx 时调用方不会进来）原样返回，不替上游猜格式。
+def with_build_info(body: bytes) -> bytes:
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return body
+    if not isinstance(doc, dict):
+        return body
+    doc["image_version"] = os.environ.get("IMAGE_VERSION") or "unknown"
+    doc["git_commit"] = os.environ.get("GIT_COMMIT") or "unknown"
+    return json.dumps(doc, ensure_ascii=False).encode()
 
 
 def check_bind_host(host: str) -> str:
@@ -125,6 +140,13 @@ class Handler(BaseHTTPRequestHandler):
             if key.lower() in DROP_HEADERS or key.lower() == "content-length":
                 continue
             self.send_header(key, value)
+        if self.command == "GET" and path in HEALTH_PATHS and 200 <= upstream.status < 300:
+            body = with_build_info(upstream.read())
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         size = upstream.headers.get("Content-Length")
         if size:
             self.send_header("Content-Length", size)
