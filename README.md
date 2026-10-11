@@ -53,7 +53,7 @@ GPUtw 照旧用镜像自己的入口。
 
 SSH 保活：sshd 每 30 秒发一次探测，连续 10 次没有回应才断开。Vast 的 SSH 模式登录后会自动进 tmux，断线重连回到同一个会话。客户端用直连 `ssh -p <VAST_TCP_PORT_22> root@<PUBLIC_IPADDR> -o ServerAliveInterval=30`，不要经过 `sshN.vast.ai` 代理。
 
-看机器状态用镜像里的 `nv-monitor`（GB10 专用，统一内存下仍能显示应用实际占用和页缓存，另有 GPU 使用率、功耗、温度、时钟和 GPU 进程），以及 `btop`、`htop`、`ncdu`。GB10 上 `nvidia-smi` 的显存一栏是 N/A。要无界面采样可以用 `nv-monitor -n -l /tmp/gpu.csv -i 1000`。
+看机器状态用镜像里的 `nv-monitor`（GB10 专用，统一内存下仍能显示应用实际占用和页缓存，另有 GPU 使用率、功耗、温度、时钟和 GPU 进程），以及 `btop`、`htop`、`ncdu`。GB10 上 `nvidia-smi` 的显存一栏是 N/A。要无界面采样可以用 `nv-monitor -n -l /tmp/gpu.csv -i 1000`。`dgxtop` 是 DGX Spark 用的终端监控，一屏看 GPU、CPU、内存、磁盘和网络，以及占用 GPU 的进程。
 
 GPUtw 用自订映像，`sshEnabled` 打开，不要开 Web UI。平台要求容器自己听 22，入口会起 sshd。`customImage.env` 最多 32 个。不要自己填 `PUBLIC_KEY`、`GATEWAY_KEY`、`NVIDIA_VISIBLE_DEVICES`、`NVIDIA_DRIVER_CAPABILITIES`，平台会拒绝。
 

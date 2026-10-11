@@ -9,6 +9,8 @@ ARG EASYTIER_VERSION=2.6.4
 ARG EASYTIER_SHA256=f533ec25a7ea714e09f645615012200278058525795cc3bb690ff011aec1a70f
 ARG NV_MONITOR_VERSION=1.14.0
 ARG NV_MONITOR_SHA256=d778d2b2db377b7aa52a8ce5119d97592f9e0731ccdde03da63ea37241205f1c
+ARG DGXTOP_VERSION=0.2.5
+ARG DGXTOP_SHA256=c935802f666a56550c8a19c2a48a262fed38a66f645954421871c31706de0a6d
 ENV TORCH_CUDA_ARCH_LIST=12.1 \
     DEBIAN_FRONTEND=noninteractive \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
@@ -57,6 +59,16 @@ RUN curl -fsSL -o /usr/local/bin/nv-monitor \
  && echo "${NV_MONITOR_SHA256}  /usr/local/bin/nv-monitor" | sha256sum -c - \
  && chmod 755 /usr/local/bin/nv-monitor \
  && nv-monitor -v
+
+# 用 musl 静态包，不依赖基础镜像的 glibc 版本。发行包是 tar.gz，sha256 校验的是压缩包本身。
+COPY licenses/dgxtop-v0.2.5-LICENSE /usr/share/licenses/dgxtop/LICENSE
+RUN curl -fsSL -o /tmp/dgxtop.tar.gz \
+      "https://github.com/DennySORA/dgxtop/releases/download/v${DGXTOP_VERSION}/dgxtop-aarch64-unknown-linux-musl.tar.gz" \
+ && echo "${DGXTOP_SHA256}  /tmp/dgxtop.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/dgxtop.tar.gz -C /usr/local/bin dgxtop \
+ && rm /tmp/dgxtop.tar.gz \
+ && chmod 755 /usr/local/bin/dgxtop \
+ && dgxtop --version
 
 COPY --from=kernels /wheels/ /tmp/wheels/
 RUN torch_before="$(python3 -c 'import torch; print(torch.__version__)')" \
