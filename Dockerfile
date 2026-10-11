@@ -93,7 +93,7 @@ RUN torch_before="$(python3 -c 'import torch; print(torch.__version__)')" \
  && python3 -c "import exllamav3, exllamav3_ext, transformers; print(transformers.__version__)"
 
 # server.patch：图片输入、developer 角色、JSON response_format、强制 tool_choice、reasoning_effort 开思考、
-# generation_config 采样默认值、OpenAI 标准响应字段。只对钉死的 SERVER_REF 生效，换提交要重做补丁。
+# generation_config 采样默认值、OpenAI 标准响应字段、单个任务失败（含 OOM）不拖垮生成线程。只对钉死的 SERVER_REF 生效，换提交要重做补丁。
 COPY server.patch /tmp/server.patch
 RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spark.git /tmp/redsnow \
  && git -C /tmp/redsnow checkout --detach "${SERVER_REF}" \

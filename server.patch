@@ -275,3 +275,47 @@ index 4945f6d..dfc50fc 100755
      server = make_server(app, args.host, args.port)
      print(f"Native API listening {args.host}:{args.port}; max_active={args.max_active_requests}", flush=True)
      try:
+diff --git a/server/worker.py b/server/worker.py
+index 56fcb9b..23705f4 100644
+--- a/server/worker.py
++++ b/server/worker.py
+@@ -64,6 +64,19 @@ class GenerationWorker:
+         ticket.events.put_nowait(error)
+         self._retire(ticket)
+ 
++    def _fail_job(self, ticket, error):
++        # The generator already released this job's pages and stays usable for the others.
++        import traceback
++        print(f"Job {ticket.identifier} failed: {type(error).__name__}", flush=True)
++        if isinstance(error, BaseException):
++            traceback.print_exception(error)
++        if type(error).__name__ == "OutOfMemoryError":
++            api_error = APIError("Out of memory; retry later or reduce concurrent load and context",
++                                 503, "out_of_memory")
++        else:
++            api_error = APIError("Generation failed; inspect the server log", 500, "generation_failed")
++        self._error(ticket, api_error)
++
+     def _run(self):
+         active, waiting = {}, deque()
+         try:
+@@ -99,9 +112,18 @@ class GenerationWorker:
+                     if not active:
+                         continue
+                     for event in self.generator.iterate():
+-                        ticket = active.get(event.get("identifier"))
++                        # reap_failed_job's error event carries the job but no identifier; without
++                        # this lookup the ticket never retires and the worker dies as "drained".
++                        ident = event.get("identifier")
++                        if ident is None and event.get("job") is not None:
++                            ident = getattr(event["job"], "identifier", None)
++                        ticket = active.get(ident)
+                         if ticket is None:
+                             continue
++                        if event.get("stage") == "error":
++                            self._fail_job(ticket, event.get("error"))
++                            del active[ident]
++                            continue
+                         # Avoid retaining GPU tensors, logits, or Job references
+                         # in slow HTTP queues.
+                         safe = {k: event[k] for k in (
