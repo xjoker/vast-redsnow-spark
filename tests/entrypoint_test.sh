@@ -100,6 +100,15 @@ install_ssh_pubkey "ssh-ed25519 AAAA test" "$root/ssh/authorized_keys"
 [[ "$(grep -c . "$root/ssh/authorized_keys")" == "1" ]] || fail "ssh key duplicated"
 [[ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$root/ssh/authorized_keys")" == "600" ]] || fail "ssh key mode"
 
+mkdir -p "$root/fixssh"
+printf 'ssh-ed25519 AAAA fix\n' >"$root/fixssh/authorized_keys"
+chmod 777 "$root/fixssh"
+chmod 666 "$root/fixssh/authorized_keys"
+fix_root_ssh_perms "$root/fixssh"
+[[ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$root/fixssh")" == "700" ]] || fail "fix ssh dir mode"
+[[ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$root/fixssh/authorized_keys")" == "600" ]] || fail "fix ssh key mode"
+fix_root_ssh_perms "$root/missing-ssh" || fail "missing ssh dir should return 0"
+
 API_TOKEN=tok MODEL_DIR=/models SSH_PASSWORD=secret \
   publish_runtime_env "$root/environment" API_TOKEN MODEL_DIR
 grep -qx 'API_TOKEN=tok' "$root/environment" || fail "published token"

@@ -47,6 +47,8 @@ setsid nohup /opt/redsnow/entrypoint.sh > /var/log/redsnow.log 2>&1 < /dev/null 
 
 Ports 加 `8898`。环境变量照常填，On-start 能读到。启动日志在 `/var/log/redsnow.log`。入口发现 Vast 的 sshd 已在运行，只让它重读配置，不再自己起。Vast 注入的 `SSH_PUBLIC_KEY` 写给 root，root 不能用密码登录。外部端口是随机的，启动日志里的 `Vast SSH` 和 `Vast API` 用的是 `PUBLIC_IPADDR` 和 `VAST_TCP_PORT_*`。
 
+Vast 实例没挂存储时，环境变量要加 `MODEL_DIR=/workspace/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw`，否则 `/models` 不是挂载点，入口不下载、不起推理。重建（recycle）会清空容器，权重要重新下载。重建后 Vast 写入的 `/root/.ssh/authorized_keys` 属主是宿主 uid，sshd 会拒绝 root 公钥登录；入口启动时会把属主改回 root。
+
 个别 GB10 主机在 SSH 模式下停在 `docker_build() error writing dockerfile`，换成 `ubuntu:24.04` 也一样，是主机的问题，换一台。
 
 GPUtw 照旧用镜像自己的入口。

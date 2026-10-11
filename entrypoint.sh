@@ -89,6 +89,27 @@ install_ssh_pubkey() {
   fi
 }
 
+# 平台重建容器时把公钥写成宿主 uid 属主，sshd StrictModes 会拒绝 root 公钥登录，所以启动时改回来。
+fix_root_ssh_perms() {
+  local dir="${1:-/root/.ssh}" path owner
+  [[ -d "$dir" ]] || return 0
+  for path in "$dir" "$dir/authorized_keys" "$dir/authorized_keys2"; do
+    [[ -e "$path" ]] || continue
+    if [[ "$EUID" -eq 0 ]]; then
+      owner="$(stat -c '%u:%g' "$path")"
+      if [[ "$owner" != "0:0" ]]; then
+        chown root:root "$path"
+        log "${path} 属主是 ${owner}，已改回 root。平台注入公钥时用了宿主 uid，sshd StrictModes 会拒绝。"
+      fi
+    fi
+  done
+  chmod 700 "$dir"
+  for path in "$dir/authorized_keys" "$dir/authorized_keys2"; do
+    [[ -e "$path" ]] || continue
+    chmod 600 "$path"
+  done
+}
+
 valid_ssh_user() {
   local user="$1"
   [[ "$user" =~ ^[a-z][-a-z0-9_]{0,31}$ && "$user" != "root" ]]
@@ -571,6 +592,7 @@ main() {
 
   # 22 先起来。后面的下载和加载都不挡 SSH。
   install_ssh_pubkey "${SSH_PUBLIC_KEY:-}" /root/.ssh/authorized_keys
+  fix_root_ssh_perms /root/.ssh
   activate_tunnel_user
   start_sshd_daemon
 
