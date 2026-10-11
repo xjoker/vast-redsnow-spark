@@ -4,10 +4,11 @@
 
 ## 当前状态
 
-- 镜像 `ghcr.io/xjoker/redsnow-exl3:20261011.5`（`VERSION`）。Vast ENTRYPOINT 模式（CLI 建实例）全流程跑通，匿名 Cloudflare 隧道、串流逐块转发、`GET /v1/models/{id}`、dgxtop、就绪横幅、定时指标都已进镜像。
-- 官方 openai SDK 17 项兼容检查全过（含图片、思考）；经隧道的长预填串流不再 524。
+- 镜像 `ghcr.io/xjoker/redsnow-exl3:20261011.10`（`VERSION`）。Vast ENTRYPOINT 模式（CLI 建实例）开机自动下载、加载，就绪后打印给 AI 用的接入横幅；匿名 Cloudflare 隧道、EasyTier、定时指标都在镜像里。
+- 20261011.8–.10 在两台 GB10 上实测：MemTotal 121.6 GiB 的 151363 和 119.6 GiB 的 146927 都是冷启动一次加载成功，官方 openai SDK 17 项兼容检查全过（146927 走 Vast 直连，151363 走隧道）。
+- EasyTier 两节点实测：三条 peer 中公网回环那条不通也能入网；两节点同时 DHCP 撞 IP 后自动换开；经虚拟 IP 访问对方 8898，无 token 401、带 token 正常；peer 全死时 EasyTier 不打日志，只有入口在 60 秒提示一次。
+- 上游生成线程遇 OOM 只让相关请求返回 503 `out_of_memory`，服务保持健康（146927 上用 8 GiB 预留复现过）。
 - 发版用 `release.yml` 手动触发；`main` 上 CI 跑 `tests/`。
-- 20261011.5 的就绪横幅和 usage/指标日志是最近一批改动，横幅文案以 `entrypoint.sh` 的 `connect_lines` 为准。
 
 ## 约束（沿用）
 
