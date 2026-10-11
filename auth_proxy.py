@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 UPSTREAM = os.environ["UPSTREAM"]
 TOKEN = os.environ["API_TOKEN"]
@@ -24,6 +24,7 @@ ALLOWED = {
     "/chat/completions",
 }
 HEALTH_PATHS = {"/health", "/v1/health"}
+MODEL_PREFIXES = ("/v1/models/", "/models/")
 DROP_HEADERS = {
     "connection",
     "keep-alive",
@@ -93,11 +94,57 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_json(self, status: int, doc: dict) -> None:
+        body = json.dumps(doc, ensure_ascii=False).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
+    # 上游只有列表接口，单个模型只能从 /v1/models 的 data 里挑。
+    def get_model(self, model: str) -> None:
+        try:
+            with urllib.request.urlopen(
+                UPSTREAM + "/v1/models", timeout=proxy_timeout()
+            ) as upstream:
+                items = json.loads(upstream.read())["data"]
+        except urllib.error.URLError as exc:
+            sys.stderr.write(
+                "%s [redsnow] 上游不可达 GET %s: %s\n"
+                % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), self.path, exc.reason)
+            )
+            self.reject(503, "model is still loading")
+            return
+        except (ValueError, KeyError, TypeError):
+            self.reject(502, "bad upstream models response")
+            return
+        for item in items:
+            if isinstance(item, dict) and item.get("id") == model:
+                self.send_json(200, item)
+                return
+        self.send_json(
+            404,
+            {
+                "error": {
+                    "message": "The model '%s' does not exist" % model,
+                    "type": "invalid_request_error",
+                    "code": "model_not_found",
+                }
+            },
+        )
+
     def proxy(self) -> None:
         if not authorized(self.headers.get("Authorization", "")):
             self.reject(401, "unauthorized")
             return
         path = urlsplit(self.path).path
+        if self.command == "GET":
+            for prefix in MODEL_PREFIXES:
+                if path.startswith(prefix) and len(path) > len(prefix):
+                    self.get_model(unquote(path[len(prefix):]))
+                    return
         if path not in ALLOWED:
             self.reject(404, "not found")
             return

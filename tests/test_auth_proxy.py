@@ -85,9 +85,74 @@ def test_health_carries_build_info():
             server.server_close()
 
 
+def _get_model(path, token=None):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+    import urllib.error
+    import urllib.request
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"object":"list","data":[{"id":"a/b","object":"model"},{"id":"c","object":"model"}]}'
+            self.send_response(200 if self.path == "/v1/models" else 404)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    upstream = HTTPServer(("127.0.0.1", 0), Upstream)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), auth_proxy.Handler)
+    for server in (upstream, proxy):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    old_upstream = auth_proxy.UPSTREAM
+    auth_proxy.UPSTREAM = f"http://127.0.0.1:{upstream.server_port}"
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_port}{path}",
+            headers={"Authorization": f"Bearer {token or auth_proxy.TOKEN}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read())
+    finally:
+        auth_proxy.UPSTREAM = old_upstream
+        for server in (proxy, upstream):
+            server.shutdown()
+            server.server_close()
+
+
+def test_get_model_found():
+    for path in ("/v1/models/c", "/models/c"):
+        status, doc = _get_model(path)
+        assert status == 200, (path, status, doc)
+        assert doc == {"id": "c", "object": "model"}, doc
+    status, doc = _get_model("/v1/models/a/b")
+    assert status == 200 and doc["id"] == "a/b", (status, doc)
+
+
+def test_get_model_not_found():
+    status, doc = _get_model("/v1/models/nope")
+    assert status == 404, (status, doc)
+    assert doc["error"]["code"] == "model_not_found", doc
+    assert doc["error"]["type"] == "invalid_request_error", doc
+
+
+def test_get_model_requires_token():
+    status, _ = _get_model("/v1/models/c", token="wrong")
+    assert status == 401, status
+
+
 if __name__ == "__main__":
     test_bind_host()
     test_empty_token_rejects()
     test_timeout_default()
     test_health_carries_build_info()
+    test_get_model_found()
+    test_get_model_not_found()
+    test_get_model_requires_token()
     print("auth_proxy ok")
