@@ -7,8 +7,92 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: arm-image
+  cancel-in-progress: false
+
 jobs:
+  kernels:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.3.0
+
+      - name: 登录 GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: 内核未变则跳过，否则构建并推送
+        run: |
+          set -euo pipefail
+          exl3=$(grep -E '^ARG EXL3_REF=' Dockerfile.kernels | head -1 | cut -d= -f2-)
+          base=$(grep -E '^ARG BASE_IMAGE=' Dockerfile.kernels | head -1 | cut -d= -f2-)
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/redsnow-kernels:${exl3}"
+          echo "EXL3_REF=${exl3}"
+          echo "BASE_IMAGE=${base}"
+          echo "KERNELS_IMAGE=${image}"
+          labels=$(docker buildx imagetools inspect --format '{{json .Image.Config.Labels}}' "$image" 2>/tmp/inspect.err || true)
+          if [ -z "${labels}" ] || [ "${labels}" = "null" ]; then
+            child=$(docker buildx imagetools inspect --format '{{json .Manifest}}' "$image" 2>/dev/null | python3 -c '
+          import json, sys
+          try:
+              doc = json.load(sys.stdin)
+          except Exception:
+              sys.exit(0)
+          for item in doc.get("manifests") or []:
+              platform = item.get("platform") or {}
+              if platform.get("os") == "linux" and platform.get("architecture") == "arm64":
+                  print(item.get("digest") or "")
+                  break
+          ' || true)
+            if [ -n "${child}" ]; then
+              labels=$(docker buildx imagetools inspect --format '{{json .Image.Config.Labels}}' "${image}@${child}" 2>>/tmp/inspect.err || true)
+            fi
+          fi
+          echo "existing labels: ${labels:-<none>}"
+          if [ -s /tmp/inspect.err ]; then
+            cat /tmp/inspect.err
+          fi
+          need=1
+          if [ -n "${labels}" ] && [ "${labels}" != "null" ]; then
+            need=$(python3 -c 'import json,sys; labels=json.loads(sys.argv[1]) or {}; same=labels.get("redsnow.exl3_ref")==sys.argv[2] and labels.get("redsnow.base_image")==sys.argv[3]; print("0" if same else "1")' "${labels}" "${exl3}" "${base}")
+          fi
+          if [ "${need}" = "0" ]; then
+            echo "内核镜像标签未变，跳过构建"
+            exit 0
+          fi
+          echo "=== before build ==="
+          df -h
+          free -m
+          (
+            while true; do
+              echo "=== monitor $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+              free -m || true
+              df -h / || true
+              uptime || true
+              sleep 30
+            done
+          ) &
+          mon=$!
+          trap 'kill "$mon" 2>/dev/null || true' EXIT
+          docker buildx build \
+            --file Dockerfile.kernels \
+            --platform linux/arm64 \
+            --build-arg "EXL3_REF=${exl3}" \
+            --build-arg "BASE_IMAGE=${base}" \
+            --tag "$image" \
+            --push \
+            --provenance=false \
+            --sbom=false \
+            .
+
   release:
+    needs: kernels
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     steps:

@@ -17,7 +17,7 @@ Vast.ai 和 GPUtw 上单台 DGX Spark（GB10，linux/arm64）的 RED-SNOW 推理
 - exllamav3 `7c1636fead6b6d802dc3ebf0e7ef02c4e76e9c2f`
 - 用法仓库的服务层 `b96fac226d9689c9e574f9b1b491c01d5340030d`
 
-EasyTier 钉在 `v2.6.4` 的 aarch64 发布包，`easytier-core` 和 `easytier-cli` 来自同一个 zip，二进制不改。许可在镜像的 `/usr/share/licenses/easytier/`：上游 LGPL-3.0、它所包含的 GPL-3.0，以及对应源码标签。exllamav3 的 MIT 文本留在 `/opt/exllamav3/LICENSE`。服务层四个文件的 MIT 文本在 `/usr/share/licenses/redsnow-server/LICENSE`。NVIDIA 基础镜像自带的许可文件保持原样。
+EasyTier 钉在 `v2.6.4` 的 aarch64 发布包，`easytier-core` 和 `easytier-cli` 来自同一个 zip，二进制不改。许可在镜像的 `/usr/share/licenses/easytier/`：上游 LGPL-3.0、它所包含的 GPL-3.0，以及对应源码标签。exllamav3 的 MIT 文本在 `/usr/share/licenses/exllamav3/LICENSE`。服务层四个文件的 MIT 文本在 `/usr/share/licenses/redsnow-server/LICENSE`。NVIDIA 基础镜像自带的许可文件保持原样。
 
 SSH 主机密钥在容器第一次启动时生成，不写进镜像。
 
@@ -33,7 +33,7 @@ SSH 主机密钥在容器第一次启动时生成，不写进镜像。
 
 版本号是当天 UTC 的 `YYYYMMDD.N`。当天第一发是 `.1`，同一天再发才递增。推送镜像只用这个 tag，不用 `latest`。GPUtw 拒绝 `latest`。
 
-推到 `main` 会跑测试，并在 `ubuntu-24.04-arm` 上构建镜像，不推送。发布要在 Actions 里手动运行「发布镜像」。它核对 `VERSION` 的日期是今天，再用 `--no-cache` 推到 `ghcr.io/<owner>/redsnow-exl3:<VERSION>`，并打上 `v<VERSION>`。基础镜像 `nvcr.io/nvidia/pytorch:26.07-py3` 是公开的，构建不需要 NGC 密钥。
+推到 `main` 只跑测试。发布要在 Actions 里手动运行「发布镜像」。它先看内核镜像上的 exllamav3 提交和基础镜像摘要，有变化才在 `ubuntu-24.04-arm` 上重建 `ghcr.io/<owner>/redsnow-kernels:<exllamav3 提交>`。应用镜像从这份内核镜像拷贝 wheel，不再在应用构建里编译。然后核对 `VERSION` 的日期是今天，用 `--no-cache` 推到 `ghcr.io/<owner>/redsnow-exl3:<VERSION>`，并打上 `v<VERSION>`。基础镜像 `nvcr.io/nvidia/pytorch:26.07-py3` 按摘要钉死，构建不需要 NGC 密钥。
 
 ## 部署
 

@@ -284,5 +284,14 @@ if grep -q 'SSH_PASSWORD' /tmp/redsnow-vast.err; then fail "vast log leaked pass
 if grep -q NGC_API_KEY .github/workflows/ci.yml .github/workflows/release.yml; then
   fail "ngc key still required"
 fi
+if grep -q 'nvcc' Dockerfile; then fail "app image still compiles"; fi
+if grep -q 'pip install -e' Dockerfile; then fail "editable install"; fi
+if grep -q 'MAX_JOBS' Dockerfile; then fail "app compile jobs"; fi
+app_base=$(grep -E '^ARG BASE_IMAGE=' Dockerfile)
+kernel_base=$(grep -E '^ARG BASE_IMAGE=' Dockerfile.kernels)
+[[ -n "$app_base" && "$app_base" == "$kernel_base" ]] || fail "base image pin"
+grep -q 'MAX_JOBS=2' Dockerfile.kernels || fail "kernel jobs"
+grep -q 'TORCH_CUDA_ARCH_LIST=12.1' Dockerfile.kernels || fail "kernel arch"
+if grep -q 'ubuntu-24.04-arm' .github/workflows/ci.yml; then fail "ci still builds on arm"; fi
 
 echo "entrypoint ok"

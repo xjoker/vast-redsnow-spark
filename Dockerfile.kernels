@@ -1,0 +1,63 @@
+# exllamav3 的 sm_121 内核。应用镜像只拷贝 wheel，不在这里以外编译。
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
+ARG EXL3_REF=7c1636fead6b6d802dc3ebf0e7ef02c4e76e9c2f
+
+FROM --platform=linux/arm64 ${BASE_IMAGE} AS build
+ARG EXL3_REF
+ENV TORCH_CUDA_ARCH_LIST=12.1 \
+    MAX_JOBS=2 \
+    PIP_INDEX_URL=https://pypi.org/simple
+
+RUN mkdir -p /out \
+ && git clone https://github.com/vcruz305/exllamav3.git /opt/exllamav3 \
+ && git -C /opt/exllamav3 checkout --detach "${EXL3_REF}" \
+ && pip wheel -v --no-deps --no-build-isolation -w /out /opt/exllamav3 \
+ && cp /opt/exllamav3/LICENSE /out/exllamav3-LICENSE
+
+RUN python3 - <<'PY'
+import glob
+import re
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+wheels = glob.glob("/out/exllamav3-*.whl")
+if len(wheels) != 1:
+    print(f"期望 1 个 wheel，实际 {wheels}", file=sys.stderr)
+    sys.exit(1)
+with zipfile.ZipFile(wheels[0]) as archive:
+    names = [
+        name
+        for name in archive.namelist()
+        if Path(name).name.startswith("exllamav3_ext") and name.endswith(".so")
+    ]
+    if len(names) != 1:
+        print(f"期望 1 个 exllamav3_ext so，实际 {names}", file=sys.stderr)
+        sys.exit(1)
+    blob = archive.read(names[0])
+so = Path("/tmp/exllamav3_ext.so")
+so.write_bytes(blob)
+dump = subprocess.run(
+    ["/usr/local/cuda/bin/cuobjdump", "--list-elf", str(so)],
+    check=False,
+    capture_output=True,
+    text=True,
+)
+print(dump.stdout)
+print(dump.stderr, file=sys.stderr)
+if dump.returncode != 0:
+    sys.exit(dump.returncode)
+archs = sorted(set(re.findall(r"sm_\d+[a-z]*", dump.stdout + dump.stderr)))
+if archs != ["sm_121"]:
+    print(f"ELF 架构不是只有 sm_121，实际 {archs}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+FROM scratch
+ARG EXL3_REF
+ARG BASE_IMAGE
+LABEL org.opencontainers.image.source="https://github.com/xjoker/vast-redsnow-spark" \
+      redsnow.exl3_ref="${EXL3_REF}" \
+      redsnow.base_image="${BASE_IMAGE}"
+COPY --from=build /out/ /wheels/
