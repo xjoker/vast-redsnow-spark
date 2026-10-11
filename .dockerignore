@@ -1,0 +1,5 @@
+.git
+.env
+.env.*
+.ruff_cache
+**/__pycache__

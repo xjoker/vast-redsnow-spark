@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""只监听本机的 Bearer 门。推理进程不直接对网络开放。"""
+"""Bearer 门。推理进程只听 127.0.0.1；这层可以再绑到虚拟网地址，不能绑 0.0.0.0。"""
 
 from __future__ import annotations
 
@@ -40,6 +40,23 @@ def authorized(header: str) -> bool:
     return hmac.compare_digest(header, f"Bearer {TOKEN}")
 
 
+def check_bind_host(host: str) -> str:
+    if host in {"0.0.0.0", "::", ""}:
+        raise SystemExit("auth proxy must not bind all interfaces")
+    return host
+
+
+def proxy_timeout() -> int:
+    raw = os.environ.get("PROXY_TIMEOUT", "7200")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"PROXY_TIMEOUT 不是整数: {raw}") from exc
+    if value < 1:
+        raise SystemExit(f"PROXY_TIMEOUT 必须为正: {value}")
+    return value
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -77,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
         if payload is not None:
             request.add_header("Content-Length", str(len(payload)))
         try:
-            upstream = urllib.request.urlopen(request, timeout=120)
+            upstream = urllib.request.urlopen(request, timeout=proxy_timeout())
         except urllib.error.HTTPError as exc:
             upstream = exc
         except urllib.error.URLError:
@@ -108,10 +125,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    host = os.environ.get("PROXY_HOST", "127.0.0.1")
+    host = check_bind_host(os.environ.get("PROXY_HOST", "127.0.0.1"))
     port = int(os.environ["PROXY_PORT"])
-    if host != "127.0.0.1":
-        raise SystemExit("auth proxy must bind 127.0.0.1")
     ThreadingHTTPServer((host, port), Handler).serve_forever()
 
 
