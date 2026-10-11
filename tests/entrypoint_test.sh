@@ -391,4 +391,60 @@ chmod +x "$cf_dir/cloudflared"
 ) || fail "cf named tunnel"
 rm -rf "$cf_dir"
 
+serve_out=$(printf '%s\n' \
+  '{"request_id":"chatcmpl-d39e","finish_reason":"stop","usage":{"prompt_tokens":188,"completion_tokens":88,"total_tokens":276,"decode_tok_s":31.09,"draft_accept":0.7571428571428571,"time_prefill":0.9676179885864258,"time_generate":2.8301398754119873,"time_enqueued":0.001661539077758789}}' \
+  | format_serve_output 2>&1)
+grep -q '输入 188 tok' <<<"$serve_out" || fail "usage prompt tokens"
+grep -q '解码 31.1 tok/s' <<<"$serve_out" || fail "usage decode rate"
+grep -q 'MTP 接受 76%' <<<"$serve_out" || fail "usage mtp accept"
+grep -q '预填 0.97 s（194 tok/s）' <<<"$serve_out" || fail "usage prefill rate"
+
+mixed_out=$(printf '%s\n' \
+  ' -- Mixed-K experts in model.language_model.layers.31.mlp: dense per-expert path' \
+  ' -- Mixed-K experts in model.language_model.layers.30.mlp: dense per-expert path' \
+  ' -- Mixed-K fused groups in model.language_model.layers.30.mlp' \
+  | format_serve_output 2>&1)
+if grep -q 'layers.31\|第 31 层' <<<"$mixed_out"; then fail "layer 31 should be dropped"; fi
+grep -q '加载权重 第 30 层' <<<"$mixed_out" || fail "layer 30 progress"
+if grep -q 'Mixed-K' <<<"$mixed_out"; then fail "mixed-k noise leaked"; fi
+health_out=$(printf '%s\n' '127.0.0.1 "GET /health HTTP/1.1" 200 -' '127.0.0.1 "GET /v1/models HTTP/1.1" 200 -' \
+  | format_serve_output 2>&1)
+if grep -q 'GET /health' <<<"$health_out"; then fail "upstream health access leaked"; fi
+grep -q 'GET /v1/models' <<<"$health_out" || fail "upstream access kept"
+
+tunnel_dir=$(mktemp -d)
+printf 'https://a-b.trycloudflare.com\n' >"$tunnel_dir/url"
+ready_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
+  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 CF_TUNNEL=1 CF_TUNNEL_TOKEN= \
+     PROXY_PORT=8898 TUNNEL_URL_FILE="$tunnel_dir/url" format_serve_output) 2>&1)
+grep -q '模型就绪' <<<"$ready_out" || fail "ready banner"
+grep -q 'https://a-b.trycloudflare.com' <<<"$ready_out" || fail "ready url"
+grep -q '上下文 262144' <<<"$ready_out" || fail "ready context"
+grep -q 'Authorization: Bearer <API_TOKEN>' <<<"$ready_out" || fail "ready auth line"
+if grep -q 'secret-xyz' <<<"$ready_out"; then fail "api token leaked into log"; fi
+rm -rf "$tunnel_dir"
+
+stub_dir=$(mktemp -d)
+cat >"$stub_dir/nvidia-smi" <<'STUB'
+#!/bin/bash
+printf '95, 64, 42.15, 2177\n'
+STUB
+chmod +x "$stub_dir/nvidia-smi"
+printf 'MemTotal:       127543204 kB\nMemAvailable:    9437184 kB\n' >"$stub_dir/meminfo"
+metrics=$(PATH="$stub_dir:$PATH" MEMINFO="$stub_dir/meminfo" SERVE_PORT=1 \
+  TUNNEL_URL_FILE="$stub_dir/no-url" metrics_line 2>/dev/null)
+grep -q 'GPU 95%' <<<"$metrics" || fail "metrics gpu"
+grep -q '内存可用' <<<"$metrics" || fail "metrics memory"
+grep -q '推理未就绪' <<<"$metrics" || fail "metrics not ready"
+if grep -q '公网' <<<"$metrics"; then fail "metrics without url file"; fi
+rm -rf "$stub_dir"
+
+(
+  API_TOKEN=tok METRICS_INTERVAL=abc
+  rc=0
+  (main) >/tmp/redsnow-metrics.out 2>/tmp/redsnow-metrics.err || rc=$?
+  [[ "$rc" -eq 1 ]] || exit 1
+  grep -q "METRICS_INTERVAL" /tmp/redsnow-metrics.err || exit 1
+) || fail "metrics interval validation"
+
 echo "entrypoint ok"

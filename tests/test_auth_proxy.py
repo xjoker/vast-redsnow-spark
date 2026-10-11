@@ -200,6 +200,77 @@ def test_stream_is_not_buffered():
             server.server_close()
 
 
+def _run_quiet_probe(upstream_port, paths):
+    import contextlib
+    import io
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import urllib.error
+    import urllib.request
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"status":"ok"}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    servers = [ThreadingHTTPServer(("127.0.0.1", 0), auth_proxy.Handler)]
+    upstream = None
+    if upstream_port is None:
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        servers.append(upstream)
+        target = f"http://127.0.0.1:{upstream.server_port}"
+    else:
+        target = f"http://127.0.0.1:{upstream_port}"
+    proxy = servers[0]
+    for server in servers:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    old_upstream = auth_proxy.UPSTREAM
+    auth_proxy.UPSTREAM = target
+    buf = io.StringIO()
+    statuses = {}
+    try:
+        with contextlib.redirect_stderr(buf):
+            for path in paths:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{proxy.server_port}{path}",
+                    headers={"Authorization": f"Bearer {auth_proxy.TOKEN}"},
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        statuses[path] = resp.status
+                        resp.read()
+                except urllib.error.HTTPError as exc:
+                    statuses[path] = exc.code
+                    exc.read()
+    finally:
+        auth_proxy.UPSTREAM = old_upstream
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+    return buf.getvalue(), statuses
+
+
+def test_health_requests_are_not_logged():
+    logged, statuses = _run_quiet_probe(None, ["/health", "/v1/health", "/v1/models"])
+    assert statuses == {"/health": 200, "/v1/health": 200, "/v1/models": 200}, statuses
+    assert "health" not in logged, logged
+    assert "/v1/models" in logged, logged
+
+
+def test_unreachable_upstream_health_is_quiet():
+    logged, statuses = _run_quiet_probe(1, ["/health", "/v1/models"])
+    assert statuses == {"/health": 503, "/v1/models": 503}, statuses
+    assert "上游不可达 GET /v1/models" in logged, logged
+    assert "上游不可达 GET /health" not in logged, logged
+    assert "/health" not in logged, logged
+
+
 if __name__ == "__main__":
     test_bind_host()
     test_empty_token_rejects()
@@ -209,4 +280,6 @@ if __name__ == "__main__":
     test_get_model_not_found()
     test_get_model_requires_token()
     test_stream_is_not_buffered()
+    test_health_requests_are_not_logged()
+    test_unreachable_upstream_health_is_quiet()
     print("auth_proxy ok")

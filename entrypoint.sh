@@ -526,7 +526,10 @@ start_cloudflared() {
           if [[ -z "$url" && "$line" =~ https://[A-Za-z0-9-]+\.trycloudflare\.com ]]; then
             url="${BASH_REMATCH[0]}"
             printf '%s\n' "$url" >"$url_file"
-            log "公网地址 ${url}，请求头 Authorization: Bearer，值是 API_TOKEN。只用串流请求，非串流超过 100 秒会被 Cloudflare 返回 524"
+            log_banner "Cloudflare 公网地址" \
+              "公网  ${url}" \
+              "鉴权  请求头 Authorization: Bearer，值是 API_TOKEN" \
+              "只用串流请求，非串流超过 100 秒会被 Cloudflare 返回 524"
           fi
         done || status=$?
     log "warn: cloudflared 退出 status=${status}"
@@ -547,6 +550,146 @@ watch_easytier_proxy() {
   log "warn: 30 秒内没有 EasyTier 地址。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
 }
 
+# 标题用等号框起来，方便在长日志里找到公网地址和就绪信息。
+log_banner() {
+  local title="$1" row
+  shift
+  log "==== ${title} ===="
+  for row in "$@"; do
+    log "  ${row}"
+  done
+  log "========================================"
+}
+
+# 没有的项不输出。鉴权行固定带字面量 <API_TOKEN>，真实 token 不进日志。
+access_lines() {
+  local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}" url=""
+  local ip="${PUBLIC_IPADDR:-}" ssh_ext="${VAST_TCP_PORT_22:-}"
+  local api_name="VAST_TCP_PORT_${PROXY_PORT:-8898}" api_ext=""
+  if [[ -s "$url_file" ]]; then
+    url="$(head -n 1 "$url_file")"
+  fi
+  if [[ -n "$url" ]]; then
+    echo "公网  ${url}"
+  elif [[ "${CF_TUNNEL:-}" == 1 && -n "${CF_TUNNEL_TOKEN:-}" ]]; then
+    echo "公网  Cloudflare 具名隧道，主机名见 Cloudflare 控制台"
+  fi
+  if [[ -v "$api_name" ]]; then
+    api_ext="${!api_name}"
+  fi
+  if [[ -n "$ip" && -n "$api_ext" ]]; then
+    echo "Vast API  http://${ip}:${api_ext}"
+  fi
+  if [[ -n "$ip" && -n "$ssh_ext" ]]; then
+    echo "Vast SSH  ssh -p ${ssh_ext} root@${ip}（root 只认账号公钥，密码登录用隧道用户）"
+  fi
+  echo "鉴权  请求头 Authorization: Bearer <API_TOKEN>"
+}
+
+json_num() {
+  local re="\"$1\":([-+0-9.eE]+)"
+  [[ "$2" =~ $re ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# 上游每个请求结束打印一行 usage JSON。字段缺任何一个返回 1，调用方原样输出那行。
+usage_summary() {
+  local line="$1" reason pt ct dts da tp te
+  local re_reason='"finish_reason":"([^"]*)"'
+  [[ "$line" =~ $re_reason ]] || return 1
+  reason="${BASH_REMATCH[1]}"
+  pt="$(json_num prompt_tokens "$line")" || return 1
+  ct="$(json_num completion_tokens "$line")" || return 1
+  dts="$(json_num decode_tok_s "$line")" || return 1
+  da="$(json_num draft_accept "$line")" || return 1
+  tp="$(json_num time_prefill "$line")" || return 1
+  te="$(json_num time_enqueued "$line")" || return 1
+  awk -v reason="$reason" -v pt="$pt" -v ct="$ct" -v dts="$dts" \
+    -v da="$da" -v tp="$tp" -v te="$te" '
+  BEGIN {
+    rate = ""
+    if (tp + 0 > 0) rate = sprintf("（%d tok/s）", pt / tp + 0.5)
+    printf "请求完成 %s｜输入 %d tok 预填 %.2f s%s｜输出 %d tok 解码 %.1f tok/s｜MTP 接受 %.0f%%｜排队 %.2f s",
+      reason, pt, tp, rate, ct, dts, da * 100, te
+  }'
+}
+
+# 推理的 stdout/stderr 经 tail 进入这里：usage 行压成一行，加载期的 Mixed-K 噪音只留层进度，Native API 就绪时打印访问信息。
+format_serve_output() {
+  local line summary start_at=$SECONDS
+  local re_layer='^ -- Mixed-K experts in model\.language_model\.layers\.([0-9]+)\.'
+  local -a rows=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == *'"usage":{'* ]] && summary="$(usage_summary "$line")"; then
+      log "$summary"
+      continue
+    fi
+    case "$line" in
+      *'"GET /health HTTP/'*|*'"GET /v1/health HTTP/'*)
+        ;;
+      " -- Mixed-K "*)
+        if [[ "$line" =~ $re_layer ]] && ((10#${BASH_REMATCH[1]} % 10 == 0)); then
+          log "加载权重 第 ${BASH_REMATCH[1]} 层"
+        fi
+        ;;
+      *"Native API listening"*)
+        printf '%s\n' "$line" >&2
+        rows=()
+        while IFS= read -r row; do
+          rows+=("$row")
+        done < <(access_lines)
+        log_banner "模型就绪" "加载用时 $((SECONDS - start_at)) 秒" "上下文 ${CACHE_SIZE:-未设置}" "${rows[@]}"
+        ;;
+      *)
+        printf '%s\n' "$line" >&2
+        ;;
+    esac
+  done
+}
+
+# 一行运行指标。nvidia-smi 缺失或失败时省略 GPU 段；上游 /health 不通写推理未就绪。
+metrics_line() {
+  local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}" meminfo="${MEMINFO:-/proc/meminfo}"
+  local gpu="" mem="" health="" public="" body="" url="" out="" seg
+  local re_requests='"requests":[[:space:]]*([0-9]+)'
+  gpu="$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm --format=csv,noheader,nounits 2>/dev/null \
+    | awk -F', *' 'NR == 1 && NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9.]+$/ && $4 ~ /^[0-9]+$/ {
+        printf "GPU %s%% %s°C %.0f W SM %s MHz", $1, $2, $3, $4 }')" || true
+  if [[ -r "$meminfo" ]]; then
+    mem="$(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 }
+      END { if (t > 0 && a > 0) printf "内存可用 %.1f/%.1f GiB", a / 1048576, t / 1048576 }' "$meminfo")"
+  fi
+  body="$(curl -fsS --max-time 2 "http://127.0.0.1:${SERVE_PORT:-8899}/health" 2>/dev/null)" || body=""
+  if [[ -z "$body" ]]; then
+    health="推理未就绪"
+  elif [[ "$body" =~ $re_requests ]]; then
+    health="进行中请求 ${BASH_REMATCH[1]}"
+  fi
+  if [[ -s "$url_file" ]]; then
+    url="$(head -n 1 "$url_file")"
+    public="公网 ${url}"
+  fi
+  for seg in "$gpu" "$mem" "$health" "$public"; do
+    [[ -n "$seg" ]] || continue
+    out="${out:+${out}｜}${seg}"
+  done
+  printf '指标 %s\n' "$out"
+}
+
+start_metrics_loop() {
+  METRICS_PID=""
+  if ((${METRICS_INTERVAL:-60} == 0)); then
+    return 0
+  fi
+  (
+    while true; do
+      sleep "$METRICS_INTERVAL"
+      log "$(metrics_line)"
+    done
+  ) &
+  METRICS_PID=$!
+}
+
 main() {
   if [[ $# -gt 0 ]]; then
     log "忽略启动引数。上下文和显存切分请用环境变量 CACHE_SIZE、GPU_SPLIT_GB。"
@@ -563,12 +706,13 @@ main() {
   VISION="${VISION:-1}"
   MAX_IMAGE_TOKENS="${MAX_IMAGE_TOKENS:-}"
   CF_TUNNEL="${CF_TUNNEL:-1}"
+  METRICS_INTERVAL="${METRICS_INTERVAL:-60}"
   MODEL_REPO="${MODEL_REPO:-$MODEL_REPO_DEFAULT}"
   MODEL_REVISION="${MODEL_REVISION:-$MODEL_REVISION_DEFAULT}"
   MODEL_DOWNLOAD="${MODEL_DOWNLOAD:-1}"
   MODEL_DOWNLOAD_WORKERS="${MODEL_DOWNLOAD_WORKERS:-8}"
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
-  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-处理器默认} CF_TUNNEL=${CF_TUNNEL}"
+  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-处理器默认} CF_TUNNEL=${CF_TUNNEL} METRICS_INTERVAL=${METRICS_INTERVAL}"
   log "模型目录 $(locked_model_dir) 仓库 ${MODEL_REPO} 修订 ${MODEL_REVISION}"
 
   case "$VISION" in
@@ -589,6 +733,10 @@ main() {
       exit 1
       ;;
   esac
+  if [[ ! "$METRICS_INTERVAL" =~ ^[0-9]+$ ]]; then
+    log "METRICS_INTERVAL 必须是非负整数，当前是 ${METRICS_INTERVAL}"
+    exit 1
+  fi
 
   # 22 先起来。后面的下载和加载都不挡 SSH。
   install_ssh_pubkey "${SSH_PUBLIC_KEY:-}" /root/.ssh/authorized_keys
@@ -605,13 +753,14 @@ main() {
   publish_runtime_env /etc/environment \
     API_TOKEN CACHE_SIZE NUM_DRAFT_TOKENS PROXY_PORT SERVE_PORT PROXY_TIMEOUT \
     MODEL_REPO MODEL_REVISION MODEL_DOWNLOAD MODEL_DOWNLOAD_WORKERS IMAGE_VERSION GIT_COMMIT \
-    VISION MAX_IMAGE_TOKENS CF_TUNNEL
+    VISION MAX_IMAGE_TOKENS CF_TUNNEL METRICS_INTERVAL
   export UPSTREAM="http://127.0.0.1:${SERVE_PORT}"
   export PROXY_PORT API_TOKEN PROXY_TIMEOUT
   start_auth_proxy 0.0.0.0
   log "用服务器 IP 和端口 ${PROXY_PORT} 访问。请求头 Authorization: Bearer，值是 API_TOKEN。不要访问 ${SERVE_PORT}，那里没有鉴权。"
   log_vast_access
   start_cloudflared
+  start_metrics_loop
 
   if [[ -z "${ET_NETWORK_NAME:-}" && -z "${ET_NETWORK_SECRET:-}" ]]; then
     log "EasyTier 未配置。走服务器 IP 和端口 ${PROXY_PORT}。"
@@ -673,14 +822,14 @@ main() {
     --request-timeout 7200 \
     "${VISION_ARGS[@]}" >>"$serve_log" 2>&1 &
   local serve_pid=$!
-  tail -n +0 -F "$serve_log" >&2 &
+  tail -n +0 -F "$serve_log" > >(format_serve_output) &
   tail_pid=$!
   if [[ -n "${DROPPER_PID:-}" ]]; then
     stop_load_cache_dropper "$DROPPER_PID" "$serve_pid" "$serve_log" &
   fi
   log "推理 pid=${serve_pid} 只监听 127.0.0.1:${SERVE_PORT}。对外是 0.0.0.0:${PROXY_PORT}。上游冷加载大约 4 到 6 分钟，权重已在页缓存里时大约一分钟。日志出现 Native API listening 后才能调用。"
   wait "${serve_pid}" || serve_status=$?
-  kill "$tail_pid" ${DROPPER_PID:+"$DROPPER_PID"} 2>/dev/null || true
+  kill "$tail_pid" ${DROPPER_PID:+"$DROPPER_PID"} ${METRICS_PID:+"$METRICS_PID"} 2>/dev/null || true
   log "推理进程退出 status=${serve_status}"
   exit "${serve_status}"
 }

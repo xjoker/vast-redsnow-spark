@@ -59,6 +59,10 @@ def with_build_info(body: bytes) -> bytes:
     return json.dumps(doc, ensure_ascii=False).encode()
 
 
+def is_health_path(path: str) -> bool:
+    return urlsplit(path).path in HEALTH_PATHS
+
+
 def check_bind_host(host: str) -> str:
     if host in {"::", ""}:
         raise SystemExit(f"认证代理绑定地址无效: {host!r}")
@@ -80,6 +84,9 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:
+        # 加载期健康检查每几秒一次，不记会刷屏。
+        if is_health_path(getattr(self, "path", "")):
+            return
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         sys.stderr.write("%s [redsnow] %s %s\n" % (stamp, self.address_string(), fmt % args))
 
@@ -171,15 +178,16 @@ class Handler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as exc:
             upstream = exc
         except urllib.error.URLError as exc:
-            sys.stderr.write(
-                "%s [redsnow] 上游不可达 %s %s: %s\n"
-                % (
-                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    self.command,
-                    self.path,
-                    exc.reason,
+            if not is_health_path(self.path):
+                sys.stderr.write(
+                    "%s [redsnow] 上游不可达 %s %s: %s\n"
+                    % (
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        self.command,
+                        self.path,
+                        exc.reason,
+                    )
                 )
-            )
             self.reject(503, "model is still loading")
             return
         self.send_response(upstream.status)
