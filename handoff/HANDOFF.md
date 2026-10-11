@@ -72,6 +72,7 @@ cgroup `memory.events` 全程 oom=0；KV 缓存启动时按 `CACHE_SIZE` 一次�
 - recycle 会清空容器，权重要重下；SSH 模式 recycle 后 `/root/.ssh/authorized_keys` 有时被写成宿主 uid（128:988），入口已自动改回 root（20261011.4 起）。
 - 个别主机在 SSH 模式停在 `docker_build() error writing dockerfile`（换 Ubuntu 也一样），换主机。已知坏：machine 150922；好：151363（日本）。列表上看不出，开机 3 分钟内不 running 就销毁（Loading 不计费）。
 - Vast 注入 `CONTAINER_RUNTIME=gvisor`，容器里写不了 `/proc/sys/vm/drop_caches`；新下载的权重占约 88 GiB 页缓存，靠镜像默认 `EXL3_UMA=1`（按 `MemAvailable` 判断）避免加载失败。
+- 同为 GB10，内核 6.17.0-1026 的主机（如 146927）MemTotal 119.63 GiB，比 1022 内核的 151363 少 2 GiB。fork 默认 `EXL3_UMA_RESERVE_MB=8192` 下首次加载报 `Insufficient VRAM`，重启后加载成功但第一个请求在 MTP 词表镜像（1.18 GiB）上 OOM。入口按 MemTotal 自动改用 6144：20 万 token 和 6 万 token 加 3 图都过，MemAvailable 最低 2.5 GiB；5120 时只剩 0.55 GiB，预填也变慢。
 - SSH 走直连，不走 `sshN.vast.ai`；推理重启、内存大量释放的瞬间网络路径断过一次（sshd 没死）。
 - EasyTier 只能 no-tun：容器无 `/dev/net/tun`、无 `CAP_NET_ADMIN`。节点拿到虚拟 IP（DHCP 或 `EASYTIER_IPV4`）后，其它节点才能经虚拟 IP 访问 `PROXY_PORT`；没有虚拟 IP 的节点只转发。`EASYTIER_PEERS` 要填公网可达地址，填 `127.0.0.1` 无效。
 - 经 Cloudflare 非串流超 100 秒返回 524；匿名隧道最多 200 个并发请求，地址每次重启都变。

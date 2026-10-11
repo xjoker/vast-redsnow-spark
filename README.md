@@ -116,6 +116,7 @@ curl -N <BASE_URL>/chat/completions \
 | `MODEL_REVISION` | `071adefe6c1c8de379d76977985811b7d4385454` | 下载的修订 |
 | `MODEL_DOWNLOAD_WORKERS` | `8` | 同时下载的文件数；单文件内部另有 Xet 并发。已完成分片下次跳过，未完成的块留在模型目录 `.hf-cache`，中断后接着传；网络错误退避重试，磁盘满则停 |
 | `GPU_SPLIT_GB` | 空，实际用 `112` | 显存切分（`-gs`），对齐上游 `serve.sh`；填了才覆盖 |
+| `EXL3_UMA_RESERVE_MB` | 空，按机器自动 | 加载时给系统留的内存（MiB）。MemTotal 约 121.6 GiB 的机器沿用 fork 默认 8192；新内核上约 119.6 GiB 的机器自动用 6144，否则首个请求就 OOM。填了才覆盖，不要低于 6144（5120 实测系统可用只剩 0.55 GiB） |
 | `CACHE_SIZE` | `262144` | KV 缓存和 `--max-model-len`（token）。KV 启动时一次分配，上下文变长不涨内存 |
 | `NUM_DRAFT_TOKENS` | `2` | MTP 草稿 token 数 |
 | `MAX_ACTIVE_REQUESTS` | `1` | 并发槽位数：同时生成的请求数，其余排队；正整数。`-ambs` 同值，加载时按它预留内存。多槽只改善短请求的排队等待，总吞吐不涨；大于 1 时配 `CACHE_SIZE=131072`，见实测 |
@@ -276,7 +277,7 @@ for t in tests/test_*.py; do python3 "$t"; done
 | 401 | 缺 Bearer，或 token 不对 |
 | 容器 running 但不下载、不起推理 | 默认 `MODEL_DIR` 的 `/models` 不是挂载点。设 `MODEL_DIR=/workspace/models/...` 或挂盘到 `/models` |
 | 加载很慢 | 冷加载约 4 到 6 分钟，权重已在页缓存时约 1 分钟。新机还要先下载 97 GiB（约 6 分钟，可 `MODEL_DOWNLOAD_WORKERS` 调线程） |
-| 加载失败 | 先看空闲内存和 `GPU_SPLIT_GB`，不要先把 `CACHE_SIZE` 降到 131072。容器里（Vast 为 gVisor）通常写不了 `/proc/sys/vm/drop_caches`，靠 `EXL3_UMA=1` 绕过 |
+| 加载失败或首个请求 503 `out_of_memory` | 先看启动日志里的 MemTotal 和 `EXL3_UMA_RESERVE_MB`，再看空闲内存和 `GPU_SPLIT_GB`，不要先把 `CACHE_SIZE` 降到 131072。容器里（Vast 为 gVisor）通常写不了 `/proc/sys/vm/drop_caches`，靠 `EXL3_UMA=1` 绕过 |
 | `vastai recycle` 后仍是旧配置 | `vastai update instance` 后立刻 recycle 可能用旧配置重建。先 `vastai show instance` 确认 `image_uuid` 和 `extra_env` 已更新 |
 | recycle 后权重重新下载 | 重建会清空容器。想保留权重就把 `MODEL_DIR` 放在持久卷 |
 | 匿名隧道地址变了 | 重启必变。`cat /run/redsnow/tunnel_url` 或看日志；要稳定地址用具名隧道 |

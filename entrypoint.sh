@@ -407,6 +407,19 @@ choose_gpu_split() {
   printf '112\n'
 }
 
+# 新内核（如 6.17.0-1026）的 GB10 MemTotal 约 119.6 GiB，比旧内核少 2 GiB。fork 默认给系统留 8 GiB 时，
+# 这类机器首次加载可能报 Insufficient VRAM，加载成功后第一个请求的 MTP 词表镜像（1.18 GiB）也会 OOM。
+# 实测留 6 GiB：20 万 token、6 万 token 加 3 张图都通过，系统 MemAvailable 最低仍有 2.5 GiB；留 5 GiB 时只剩 0.55 GiB。
+# 输出空表示沿用 fork 默认（8192）。
+choose_uma_reserve() {
+  local explicit="$1" mem_total_kib="$2"
+  if [[ -n "$explicit" ]]; then
+    printf '%s\n' "$explicit"
+  elif ((mem_total_kib < 126500000)); then
+    printf '6144\n'
+  fi
+}
+
 split_warning() {
   local gs="$1" cache="$2"
   if ((cache >= 262144 && gs < 108)); then
@@ -911,6 +924,13 @@ main() {
   # EXL3_UMA=1 时 exllamav3 按 MemAvailable 算余量，页缓存会被回收，这里读到的空闲偏低不代表会失败。
   if [[ "${EXL3_UMA:-}" != 1 ]] && (( free_gib < gs + 2 )); then
     log "warn: 空闲 ${free_gib} GiB，上游 serve.sh 仍用 -gs ${gs}。页缓存占满时这次加载会失败。"
+  fi
+  local mem_total_kib uma_reserve
+  mem_total_kib="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
+  uma_reserve="$(choose_uma_reserve "${EXL3_UMA_RESERVE_MB:-}" "$mem_total_kib")"
+  if [[ -n "$uma_reserve" ]]; then
+    export EXL3_UMA_RESERVE_MB="$uma_reserve"
+    log "MemTotal $((mem_total_kib / 1048576)) GiB，EXL3_UMA_RESERVE_MB=${uma_reserve}（给系统留的内存，fork 默认 8192）。"
   fi
   log "GPU_SPLIT_GB=${gs} CACHE_SIZE=${CACHE_SIZE} 空闲显存约 ${free_gib} GiB"
   start_load_cache_dropper
