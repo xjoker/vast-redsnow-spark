@@ -11,6 +11,8 @@ ARG NV_MONITOR_VERSION=1.14.0
 ARG NV_MONITOR_SHA256=d778d2b2db377b7aa52a8ce5119d97592f9e0731ccdde03da63ea37241205f1c
 ARG DGXTOP_VERSION=0.2.5
 ARG DGXTOP_SHA256=c935802f666a56550c8a19c2a48a262fed38a66f645954421871c31706de0a6d
+ARG CLOUDFLARED_VERSION=2026.9.3
+ARG CLOUDFLARED_SHA256=aaeb2d7d0da3614634c7e03ab13487a1522c2e79165ed2929cfe23d5e95b326d
 ENV TORCH_CUDA_ARCH_LIST=12.1 \
     DEBIAN_FRONTEND=noninteractive \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
@@ -69,6 +71,14 @@ RUN curl -fsSL -o /tmp/dgxtop.tar.gz \
  && rm /tmp/dgxtop.tar.gz \
  && chmod 755 /usr/local/bin/dgxtop \
  && dgxtop --version
+
+# cloudflared 把认证代理暴露到公网，入口只指向 PROXY_PORT。Apache-2.0。
+COPY licenses/cloudflared-2026.9.3-LICENSE /usr/share/licenses/cloudflared/LICENSE
+RUN curl -fsSL -o /usr/local/bin/cloudflared \
+      "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-arm64" \
+ && echo "${CLOUDFLARED_SHA256}  /usr/local/bin/cloudflared" | sha256sum -c - \
+ && chmod 755 /usr/local/bin/cloudflared \
+ && cloudflared --version
 
 COPY --from=kernels /wheels/ /tmp/wheels/
 RUN torch_before="$(python3 -c 'import torch; print(torch.__version__)')" \

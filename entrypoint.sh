@@ -474,6 +474,44 @@ start_auth_proxy() {
   log "认证代理 pid=$! 监听 ${host}:${PROXY_PORT} 上游 ${UPSTREAM}"
 }
 
+# 只指向认证代理 PROXY_PORT，绝不指向推理端口。匿名地址写到 TUNNEL_URL_FILE，方便 cat，不用翻日志。
+start_cloudflared() {
+  [[ "$CF_TUNNEL" == 1 ]] || return 0
+  if ! command -v cloudflared >/dev/null 2>&1; then
+    log "warn: 镜像里没有 cloudflared，公网隧道不启动。"
+    return 0
+  fi
+  local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}"
+  mkdir -p "$(dirname "$url_file")"
+  rm -f "$url_file"
+  # token 只进子进程环境变量，不放命令行参数，不写日志。
+  if [[ -n "${CF_TUNNEL_TOKEN:-}" ]]; then
+    log "Cloudflare 具名隧道启动。公网主机名在 Cloudflare 控制台配置，服务地址要填 http://localhost:${PROXY_PORT}。"
+    (
+      status=0
+      TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" cloudflared tunnel --no-autoupdate run 2>&1 \
+        | while IFS= read -r line; do printf '%s\n' "$line" >&2; done || status=$?
+      log "warn: cloudflared 退出 status=${status}"
+    ) &
+    return 0
+  fi
+  log "Cloudflare 匿名隧道启动，正在申请公网地址。"
+  (
+    status=0
+    url=""
+    cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${PROXY_PORT}" 2>&1 \
+      | while IFS= read -r line; do
+          printf '%s\n' "$line" >&2
+          if [[ -z "$url" && "$line" =~ https://[A-Za-z0-9-]+\.trycloudflare\.com ]]; then
+            url="${BASH_REMATCH[0]}"
+            printf '%s\n' "$url" >"$url_file"
+            log "公网地址 ${url}，请求头 Authorization: Bearer，值是 API_TOKEN。只用串流请求，非串流超过 100 秒会被 Cloudflare 返回 524"
+          fi
+        done || status=$?
+    log "warn: cloudflared 退出 status=${status}"
+  ) &
+}
+
 watch_easytier_proxy() {
   local ip=""
   local _
@@ -503,12 +541,13 @@ main() {
   PROXY_TIMEOUT="${PROXY_TIMEOUT:-7200}"
   VISION="${VISION:-1}"
   MAX_IMAGE_TOKENS="${MAX_IMAGE_TOKENS:-}"
+  CF_TUNNEL="${CF_TUNNEL:-1}"
   MODEL_REPO="${MODEL_REPO:-$MODEL_REPO_DEFAULT}"
   MODEL_REVISION="${MODEL_REVISION:-$MODEL_REVISION_DEFAULT}"
   MODEL_DOWNLOAD="${MODEL_DOWNLOAD:-1}"
   MODEL_DOWNLOAD_WORKERS="${MODEL_DOWNLOAD_WORKERS:-8}"
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
-  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-处理器默认}"
+  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-处理器默认} CF_TUNNEL=${CF_TUNNEL}"
   log "模型目录 $(locked_model_dir) 仓库 ${MODEL_REPO} 修订 ${MODEL_REVISION}"
 
   case "$VISION" in
@@ -522,6 +561,13 @@ main() {
     log "MAX_IMAGE_TOKENS 必须是正整数，当前是 ${MAX_IMAGE_TOKENS}"
     exit 1
   fi
+  case "$CF_TUNNEL" in
+    0 | 1) ;;
+    *)
+      log "CF_TUNNEL 只能是 0 或 1，当前是 ${CF_TUNNEL}"
+      exit 1
+      ;;
+  esac
 
   # 22 先起来。后面的下载和加载都不挡 SSH。
   install_ssh_pubkey "${SSH_PUBLIC_KEY:-}" /root/.ssh/authorized_keys
@@ -537,12 +583,13 @@ main() {
   publish_runtime_env /etc/environment \
     API_TOKEN CACHE_SIZE NUM_DRAFT_TOKENS PROXY_PORT SERVE_PORT PROXY_TIMEOUT \
     MODEL_REPO MODEL_REVISION MODEL_DOWNLOAD MODEL_DOWNLOAD_WORKERS IMAGE_VERSION GIT_COMMIT \
-    VISION MAX_IMAGE_TOKENS
+    VISION MAX_IMAGE_TOKENS CF_TUNNEL
   export UPSTREAM="http://127.0.0.1:${SERVE_PORT}"
   export PROXY_PORT API_TOKEN PROXY_TIMEOUT
   start_auth_proxy 0.0.0.0
   log "用服务器 IP 和端口 ${PROXY_PORT} 访问。请求头 Authorization: Bearer，值是 API_TOKEN。不要访问 ${SERVE_PORT}，那里没有鉴权。"
   log_vast_access
+  start_cloudflared
 
   if [[ -z "${ET_NETWORK_NAME:-}" && -z "${ET_NETWORK_SECRET:-}" ]]; then
     log "EasyTier 未配置。走服务器 IP 和端口 ${PROXY_PORT}。"

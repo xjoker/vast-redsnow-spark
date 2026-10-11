@@ -57,7 +57,7 @@ SSH 保活：sshd 每 30 秒发一次探测，连续 10 次没有回应才断开
 
 GPUtw 用自订映像，`sshEnabled` 打开，不要开 Web UI。平台要求容器自己听 22，入口会起 sshd。`customImage.env` 最多 32 个。不要自己填 `PUBLIC_KEY`、`GATEWAY_KEY`、`NVIDIA_VISIBLE_DEVICES`、`NVIDIA_DRIVER_CAPABILITIES`，平台会拒绝。
 
-可以写进表单的变量是 `.env.example` 里的 23 个。必填只有 `API_TOKEN`。EasyTier 和隧道用户都是填了才启动，留空就跳过。只测 SSH 和端口时设 `MODEL_DOWNLOAD=0`。其余有默认值，表单留空。密钥只放在部署表单里，不进镜像。
+可以写进表单的变量是 `.env.example` 里的 25 个。必填只有 `API_TOKEN`。EasyTier 和隧道用户都是填了才启动，留空就跳过。只测 SSH 和端口时设 `MODEL_DOWNLOAD=0`。其余有默认值，表单留空。密钥只放在部署表单里，不进镜像。
 
 构建时的 apt、pip、GitHub、Hugging Face 都用官方主机。国家代码和大陆镜像站会改回 `archive.ubuntu.com`、`ports.ubuntu.com`、`pypi.org`、`github.com`、`huggingface.co`。落到哪台边缘由这些服务自己解析，镜像里不写地区。
 
@@ -78,6 +78,14 @@ GPUtw 用自订映像，`sshEnabled` 打开，不要开 Web UI。平台要求容
 默认上下文 `262144`。提示词加上一页余量（256）之后没有输出空间时，服务返回 400，入口不会裁提示词。客户端要在 `prompt_tokens` 达到 `CACHE_SIZE - 256` 之前自己压缩。
 
 加载失败时先看空闲显存和 `GPU_SPLIT_GB`，不是先把上下文改成 131072。`TRITON_PTXAS_PATH` 必须指向认识 `sm_121a` 的 ptxas，镜像里默认是 `/usr/local/cuda/bin/ptxas`。NGC 26.07 这支 ptxas 是否认识 `sm_121a` 还没在这台镜像里跑过；不认识的话，加载会死在 `causal_conv1d_update`。
+
+## Cloudflare 隧道
+
+入口默认用 cloudflared 把认证代理（`PROXY_PORT`，默认 8898）暴露到公网。`CF_TUNNEL=0` 关闭。隧道只指向认证代理，不指向 8899。
+
+- `CF_TUNNEL_TOKEN` 留空：匿名快速隧道。地址是 `https://<随机>.trycloudflare.com`，每次重启都变，没有可用性保证，同时最多 200 个请求。地址打在启动日志里，也写进 `/run/redsnow/tunnel_url`，`cat /run/redsnow/tunnel_url` 即可。
+- `CF_TUNNEL_TOKEN` 填自己的具名隧道 token：在 Cloudflare 控制台把公网主机名的服务地址指向 `http://localhost:8898`。token 只走环境变量，不进命令行，不进日志。
+- 限制：非串流请求超过 100 秒，Cloudflare 返回 524。客户端用 `stream: true`。
 
 ## OpenAI 兼容与多模态
 

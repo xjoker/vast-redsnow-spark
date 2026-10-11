@@ -330,4 +330,56 @@ if grep -q 'ubuntu-24.04-arm' .github/workflows/ci.yml; then fail "ci still buil
   grep -q "MAX_IMAGE_TOKENS" /tmp/redsnow-vision.err || fail "bad MAX_IMAGE_TOKENS text"
 ) || fail "max image tokens validation"
 
+grep -q 'ARG CLOUDFLARED_SHA256=[0-9a-f]\{64\}$' Dockerfile || fail "cloudflared sha256 pin"
+grep -q 'CLOUDFLARED_SHA256}  /usr/local/bin/cloudflared" | sha256sum -c -' Dockerfile || fail "cloudflared sha256 check"
+grep -q '/usr/share/licenses/cloudflared/LICENSE' Dockerfile || fail "cloudflared license path"
+grep -q 'Apache License' licenses/cloudflared-2026.9.3-LICENSE || fail "cloudflared license body"
+
+(
+  API_TOKEN=tok CF_TUNNEL=yes
+  rc=0
+  (main) >/tmp/redsnow-cf.out 2>/tmp/redsnow-cf.err || rc=$?
+  [[ "$rc" -eq 1 ]] || fail "bad CF_TUNNEL rc=$rc"
+  grep -q "CF_TUNNEL" /tmp/redsnow-cf.err || fail "bad CF_TUNNEL text"
+) || fail "cf tunnel flag"
+
+cf_dir=$(mktemp -d)
+cat >"$cf_dir/cloudflared" <<'EOF'
+#!/bin/bash
+printf 'TUNNEL_TOKEN=%s\n' "${TUNNEL_TOKEN:-}" >>"$CF_STUB_ENV"
+printf '%s\n' "$*" >>"$CF_STUB_ARGS"
+echo "https://quiet-stub-words.trycloudflare.com" >&2
+EOF
+chmod +x "$cf_dir/cloudflared"
+(
+  CF_TUNNEL=0 PROXY_PORT=8898
+  export CF_STUB_ARGS="$cf_dir/off-args" CF_STUB_ENV="$cf_dir/off-env"
+  unset CF_TUNNEL_TOKEN
+  export PATH="$cf_dir:$PATH" TUNNEL_URL_FILE="$cf_dir/off-url"
+  start_cloudflared
+  [[ ! -e "$cf_dir/off-args" && ! -e "$cf_dir/off-url" ]] || exit 1
+) || fail "cf tunnel off"
+(
+  CF_TUNNEL=1 PROXY_PORT=8898
+  export CF_STUB_ARGS="$cf_dir/anon-args" CF_STUB_ENV="$cf_dir/anon-env"
+  unset CF_TUNNEL_TOKEN
+  export PATH="$cf_dir:$PATH" TUNNEL_URL_FILE="$cf_dir/anon-url"
+  start_cloudflared
+  for _ in $(seq 1 50); do [[ -s "$cf_dir/anon-url" ]] && break; sleep 0.1; done
+  grep -q -- '--url http://127.0.0.1:8898' "$cf_dir/anon-args" || exit 1
+  grep -qx 'https://quiet-stub-words.trycloudflare.com' "$cf_dir/anon-url" || exit 1
+) || fail "cf anonymous tunnel"
+(
+  CF_TUNNEL=1 PROXY_PORT=8898 CF_TUNNEL_TOKEN=named-token-value-123
+  export CF_STUB_ARGS="$cf_dir/named-args" CF_STUB_ENV="$cf_dir/named-env"
+  export PATH="$cf_dir:$PATH" TUNNEL_URL_FILE="$cf_dir/named-url"
+  start_cloudflared
+  for _ in $(seq 1 50); do [[ -s "$cf_dir/named-args" ]] && break; sleep 0.1; done
+  grep -qx 'tunnel --no-autoupdate run' "$cf_dir/named-args" || exit 1
+  if grep -q 'named-token-value-123' "$cf_dir/named-args"; then exit 1; fi
+  if grep -q -- '--url' "$cf_dir/named-args"; then exit 1; fi
+  grep -qx 'TUNNEL_TOKEN=named-token-value-123' "$cf_dir/named-env" || exit 1
+) || fail "cf named tunnel"
+rm -rf "$cf_dir"
+
 echo "entrypoint ok"
