@@ -459,35 +459,63 @@ stop_load_cache_dropper() {
   kill "$dropper" 2>/dev/null || true
 }
 
+# 启动前校验，错在入口而不是等 easytier-core 静默连不上。
+check_easytier_peers() {
+  local item re='^(tcp|udp)://[^,[:space:]]+:[0-9]+$'
+  local -a items=()
+  [[ -n "$1" ]] || return 0
+  IFS=, read -ra items <<<"$1"
+  for item in "${items[@]}"; do
+    if [[ ! "$item" =~ $re ]]; then
+      log "EASYTIER_PEERS 项无效: ${item}。应为 tcp://host:port 或 udp://host:port，逗号分隔。"
+      return 1
+    fi
+  done
+}
+
+# 把 EASYTIER_* 映射成 easytier-core 的 ET_*。用户只认 EASYTIER_* 前缀，ET_* 不再读取。
+# 没有虚拟 IP 的节点只转发、不可达，所以 IPV4 留空时总是申请 DHCP。
 prepare_easytier() {
-  local name="${ET_NETWORK_NAME:-}" secret="${ET_NETWORK_SECRET:-}"
+  local name="${EASYTIER_NETWORK_NAME:-}" secret="${EASYTIER_NETWORK_SECRET:-}"
+  # 旧容器重启时可能残留上一次的虚拟 IP，不先删会让横幅指向已失效的地址。
+  rm -f "${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}"
   if [[ -z "$name" && -z "$secret" ]]; then
+    log "EasyTier 未配置。走服务器 IP 和端口 ${PROXY_PORT:-8898}。"
     return 1
   fi
   if [[ -z "$name" || -z "$secret" ]]; then
-    log "warn: EasyTier 需要同时填写 ET_NETWORK_NAME 和 ET_NETWORK_SECRET，这次不启动。"
+    log "warn: EasyTier 需要同时填写 EASYTIER_NETWORK_NAME 和 EASYTIER_NETWORK_SECRET，这次不启动。"
     return 1
   fi
-  if [[ -n "${ET_ENABLE_EXIT_NODE:-}" || -n "${ET_EXIT_NODES:-}" ]]; then
-    log "warn: 已忽略出口节点。这个容器不做流量出口。"
-    unset ET_ENABLE_EXIT_NODE ET_EXIT_NODES
+  export ET_NETWORK_NAME="$name" ET_NETWORK_SECRET="$secret"
+  export ET_HOSTNAME="${EASYTIER_HOSTNAME:-redsnow}"
+  if [[ "${EASYTIER_PRIVATE_MODE:-1}" == 1 ]]; then
+    export ET_PRIVATE_MODE=true
+  else
+    export ET_PRIVATE_MODE=false
   fi
-  export ET_HOSTNAME="${ET_HOSTNAME:-redsnow}"
-  export ET_DEV_NAME="${ET_DEV_NAME:-ets0}"
-  if ! have_tun; then
-    log "warn: 没有 /dev/net/tun，EasyTier 不建虚拟网卡。节点仍会连 peer。认证代理仍在 0.0.0.0:${PROXY_PORT:-8898}。"
-    export ET_NO_TUN=true
-    return 0
+  if [[ -n "${EASYTIER_PEERS:-}" ]]; then
+    export ET_PEERS="$EASYTIER_PEERS"
   fi
-  if [[ -z "${ET_IPV4:-}" && -z "${ET_DHCP:-}" ]]; then
+  if [[ -n "${EASYTIER_IPV4:-}" ]]; then
+    export ET_IPV4="$EASYTIER_IPV4"
+  else
     export ET_DHCP=true
+  fi
+  # 容器没有 /dev/net/tun 和 CAP_NET_ADMIN，只能 no-tun。
+  if ! have_tun; then
+    log "warn: 没有 /dev/net/tun，EasyTier 走 no-tun。同网节点经虚拟 IP 访问 ${PROXY_PORT:-8898}。"
+    export ET_NO_TUN=true
   fi
   return 0
 }
 
-easytier_ipv4() {
-  ip -4 -o addr show dev "${ET_DEV_NAME:-ets0}" 2>/dev/null \
-    | awk 'NR==1 { split($4, a, "/"); print a[1]; exit }'
+# easytier-cli 输出 JSON，节点的 ipv4_addr 形如 10.144.144.1/24，这里去掉掩码。
+easytier_vip() {
+  local out re='"ipv4_addr"[[:space:]]*:[[:space:]]*"([0-9.]+)/[0-9]+"'
+  out="$(easytier-cli -o json node 2>/dev/null)" || return 1
+  [[ "$out" =~ $re ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
 start_auth_proxy() {
@@ -537,18 +565,28 @@ start_cloudflared() {
   ) &
 }
 
-watch_easytier_proxy() {
-  local ip=""
-  local _
-  for _ in $(seq 1 30); do
-    ip="$(easytier_ipv4 || true)"
+start_easytier() {
+  nohup easytier-core >/proc/1/fd/2 2>&1 &
+  log "EasyTier 启动 pid=$!。EASYTIER_PEERS 留空时只等别人来连。"
+  watch_easytier_vip &
+}
+
+# DHCP 分到虚拟 IP 要几秒，轮询最多 60 秒。地址写文件，供就绪横幅和指标行读取。
+watch_easytier_vip() {
+  local ip="" file="${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}" _
+  for _ in $(seq 1 60); do
+    ip="$(easytier_vip || true)"
     if [[ -n "$ip" ]]; then
-      log "EasyTier 地址 ${ip}。端口 ${PROXY_PORT} 已在 0.0.0.0 监听，这个地址和服务器 IP 都要带 Bearer token。"
+      mkdir -p "$(dirname "$file")"
+      printf '%s\n' "$ip" >"$file"
+      log_banner "EasyTier 已入网" \
+        "虚拟 IP  ${ip}" \
+        "接入    http://${ip}:${PROXY_PORT}/v1（同网节点访问，带 Bearer）"
       return 0
     fi
     sleep 1
   done
-  log "warn: 30 秒内没有 EasyTier 地址。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
+  log "warn: 60 秒内没有拿到 EasyTier 虚拟 IP。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
 }
 
 # 标题用等号框起来，方便在长日志里找到公网地址和就绪信息。
@@ -566,6 +604,7 @@ log_banner() {
 # 隧道优先于 Vast 直连，因为隧道是 HTTPS，Vast 映射是 HTTP 明文。鉴权行带字面量，真实 token 不进日志。没有的项不输出。
 connect_lines() {
   local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}" tunnel_url=""
+  local ip_file="${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}"
   local ip="${PUBLIC_IPADDR:-}" api_name="VAST_TCP_PORT_${PROXY_PORT:-8898}" api_ext=""
   local vast="" base="" tunnel=0 caps body
   if [[ -s "$url_file" ]]; then
@@ -598,9 +637,13 @@ connect_lines() {
   if [[ "$tunnel" == 1 && -n "$vast" ]]; then
     echo "备用 URL  ${vast}（Vast 直连，HTTP 明文）"
   fi
+  if [[ -s "$ip_file" ]]; then
+    echo "EasyTier  http://$(head -n 1 "$ip_file"):${PROXY_PORT:-8898}/v1（同网节点）"
+  fi
   echo "模型      ${SERVED_MODEL_NAME}"
   echo "鉴权      请求头 Authorization: Bearer <API_TOKEN>"
   echo "上下文    ${CACHE_SIZE} tok，输入加 max_tokens 超过会返回 400"
+  echo "并发      ${MAX_ACTIVE_REQUESTS} 个请求同时生成，其余排队"
   echo "建议      max_tokens 不超过 32000，对话超过 $((CACHE_SIZE - 32768)) tok 就压缩或截断"
   if [[ "$tunnel" == 1 ]]; then
     echo "串流      必须 stream: true，非串流超过 100 秒会被 Cloudflare 返回 524"
@@ -685,7 +728,8 @@ format_serve_output() {
 # 一行运行指标。nvidia-smi 缺失或失败时省略 GPU 段；上游 /health 不通写推理未就绪。
 metrics_line() {
   local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}" meminfo="${MEMINFO:-/proc/meminfo}"
-  local gpu="" mem="" health="" public="" body="" url="" out="" seg
+  local ip_file="${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}"
+  local gpu="" mem="" health="" et="" public="" body="" url="" out="" seg
   local re_requests='"requests":[[:space:]]*([0-9]+)'
   gpu="$(nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,power.draw,clocks.sm --format=csv,noheader,nounits 2>/dev/null \
     | awk -F', *' 'NR == 1 && NF == 4 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9.]+$/ && $4 ~ /^[0-9]+$/ {
@@ -700,11 +744,14 @@ metrics_line() {
   elif [[ "$body" =~ $re_requests ]]; then
     health="进行中请求 ${BASH_REMATCH[1]}"
   fi
+  if [[ -s "$ip_file" ]]; then
+    et="EasyTier $(head -n 1 "$ip_file")"
+  fi
   if [[ -s "$url_file" ]]; then
     url="$(head -n 1 "$url_file")"
     public="公网 ${url}"
   fi
-  for seg in "$gpu" "$mem" "$health" "$public"; do
+  for seg in "$gpu" "$mem" "$health" "$et" "$public"; do
     [[ -n "$seg" ]] || continue
     out="${out:+${out}｜}${seg}"
   done
@@ -746,8 +793,11 @@ main() {
   MODEL_REVISION="${MODEL_REVISION:-$MODEL_REVISION_DEFAULT}"
   MODEL_DOWNLOAD="${MODEL_DOWNLOAD:-1}"
   MODEL_DOWNLOAD_WORKERS="${MODEL_DOWNLOAD_WORKERS:-8}"
+  # -ambs 让 exllamav3 加载时按同一批大小预留内存，所以它必须不小于并发槽位数，这里用同一个值。
+  MAX_ACTIVE_REQUESTS="${MAX_ACTIVE_REQUESTS:-1}"
+  EASYTIER_PRIVATE_MODE="${EASYTIER_PRIVATE_MODE:-1}"
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
-  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-处理器默认} CF_TUNNEL=${CF_TUNNEL} METRICS_INTERVAL=${METRICS_INTERVAL}"
+  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-处理器默认} CF_TUNNEL=${CF_TUNNEL} METRICS_INTERVAL=${METRICS_INTERVAL}"
   log "模型目录 $(locked_model_dir) 仓库 ${MODEL_REPO} 修订 ${MODEL_REVISION}"
 
   case "$VISION" in
@@ -772,6 +822,18 @@ main() {
     log "METRICS_INTERVAL 必须是非负整数，当前是 ${METRICS_INTERVAL}"
     exit 1
   fi
+  if [[ ! "$MAX_ACTIVE_REQUESTS" =~ ^[1-9][0-9]*$ ]]; then
+    log "MAX_ACTIVE_REQUESTS 必须是正整数，当前是 ${MAX_ACTIVE_REQUESTS}"
+    exit 1
+  fi
+  case "$EASYTIER_PRIVATE_MODE" in
+    0 | 1) ;;
+    *)
+      log "EASYTIER_PRIVATE_MODE 只能是 0 或 1，当前是 ${EASYTIER_PRIVATE_MODE}"
+      exit 1
+      ;;
+  esac
+  check_easytier_peers "${EASYTIER_PEERS:-}" || exit 1
 
   # 22 先起来。后面的下载和加载都不挡 SSH。
   install_ssh_pubkey "${SSH_PUBLIC_KEY:-}" /root/.ssh/authorized_keys
@@ -786,7 +848,7 @@ main() {
   log "ptxas ${TRITON_PTXAS_PATH}"
 
   publish_runtime_env /etc/environment \
-    API_TOKEN CACHE_SIZE NUM_DRAFT_TOKENS PROXY_PORT SERVE_PORT PROXY_TIMEOUT \
+    API_TOKEN CACHE_SIZE NUM_DRAFT_TOKENS MAX_ACTIVE_REQUESTS PROXY_PORT SERVE_PORT PROXY_TIMEOUT \
     MODEL_REPO MODEL_REVISION MODEL_DOWNLOAD MODEL_DOWNLOAD_WORKERS IMAGE_VERSION GIT_COMMIT \
     VISION MAX_IMAGE_TOKENS CF_TUNNEL METRICS_INTERVAL
   export UPSTREAM="http://127.0.0.1:${SERVE_PORT}"
@@ -797,17 +859,8 @@ main() {
   start_cloudflared
   start_metrics_loop
 
-  if [[ -z "${ET_NETWORK_NAME:-}" && -z "${ET_NETWORK_SECRET:-}" ]]; then
-    log "EasyTier 未配置。走服务器 IP 和端口 ${PROXY_PORT}。"
-  elif prepare_easytier; then
-    log "EasyTier 启动。默认监听 tcp/udp 11010。未设置 ET_PEERS 时只等别人来连。认证方式与服务器 IP 相同。"
-    nohup easytier-core >/proc/1/fd/2 2>&1 &
-    log "easytier-core pid=$!"
-    if have_tun; then
-      watch_easytier_proxy &
-    fi
-  else
-    log "EasyTier 未启动。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
+  if prepare_easytier; then
+    start_easytier
   fi
 
   local model_rc=0
@@ -842,7 +895,7 @@ main() {
 
   serve_log="$(mktemp)"
   vision_serve_args
-  log "启动推理，参数对齐上游 serve.sh：-m ${MODEL_DIR} -gs ${gs} --cache_size ${CACHE_SIZE} --cache_quant 4 --mtp --num_draft_tokens ${NUM_DRAFT_TOKENS} --max-model-len ${CACHE_SIZE} --port ${SERVE_PORT} ${VISION_ARGS[*]}"
+  log "启动推理，参数对齐上游 serve.sh：-m ${MODEL_DIR} -gs ${gs} --cache_size ${CACHE_SIZE} --cache_quant 4 --mtp --num_draft_tokens ${NUM_DRAFT_TOKENS} --max-model-len ${CACHE_SIZE} --max-active-requests ${MAX_ACTIVE_REQUESTS} -ambs ${MAX_ACTIVE_REQUESTS} --port ${SERVE_PORT} ${VISION_ARGS[*]}"
   python3 /opt/redsnow/server/serve_glm.py \
     -m "${MODEL_DIR}" \
     -gs "${gs}" \
@@ -851,6 +904,7 @@ main() {
     --mtp \
     --num_draft_tokens "${NUM_DRAFT_TOKENS}" \
     --max-model-len "${CACHE_SIZE}" \
+    --max-active-requests "${MAX_ACTIVE_REQUESTS}" -ambs "${MAX_ACTIVE_REQUESTS}" \
     --host 127.0.0.1 \
     --port "${SERVE_PORT}" \
     --served-model-name "${SERVED_MODEL_NAME}" \

@@ -33,7 +33,7 @@
 
 - 预填约 660 tok/s 是 GPU 跑满（96%）时的速度；前缀缓存有效，同一份 9.4 万 token 文档第二次起首 token 0.8 s。
 - 解码：写代码 33–34 tok/s（MTP 接受率 0.86–0.89），接近 25 万 token 时 19–26 tok/s。
-- 并发槽只有 1（`max_active=1`），4 个请求排队总吞吐约 25 tok/s。
+- 并发槽默认 1（`max_active=1`，`MAX_ACTIVE_REQUESTS` 可调），4 个请求排队总吞吐约 25 tok/s。调大后的吞吐和内存占用未测（待补）。
 - `NUM_DRAFT_TOKENS=3` 快约 5% 但接受率降到 0.73–0.80，维持 2；预填 `chunk_size` 8192 会 `Generator drained`，维持 4096。
 
 **内存（视觉，`MAX_IMAGE_TOKENS` 8000）**
@@ -72,6 +72,7 @@ cgroup `memory.events` 全程 oom=0；KV 缓存启动时按 `CACHE_SIZE` 一次�
 - 个别主机在 SSH 模式停在 `docker_build() error writing dockerfile`（换 Ubuntu 也一样），换主机。已知坏：machine 150922；好：151363（日本）。列表上看不出，开机 3 分钟内不 running 就销毁（Loading 不计费）。
 - Vast 注入 `CONTAINER_RUNTIME=gvisor`，容器里写不了 `/proc/sys/vm/drop_caches`；新下载的权重占约 88 GiB 页缓存，靠镜像默认 `EXL3_UMA=1`（按 `MemAvailable` 判断）避免加载失败。
 - SSH 走直连，不走 `sshN.vast.ai`；推理重启、内存大量释放的瞬间网络路径断过一次（sshd 没死）。
+- EasyTier 只能 no-tun：容器无 `/dev/net/tun`、无 `CAP_NET_ADMIN`。节点拿到虚拟 IP（DHCP 或 `EASYTIER_IPV4`）后，其它节点才能经虚拟 IP 访问 `PROXY_PORT`；没有虚拟 IP 的节点只转发。`EASYTIER_PEERS` 要填公网可达地址，填 `127.0.0.1` 无效。
 - 经 Cloudflare 非串流超 100 秒返回 524；匿名隧道最多 200 个并发请求，地址每次重启都变。
 - 认证代理必须用 `read1` 逐块转发，`read` 会攒满 64 KiB 才返回，SSE 被攒住（已修，`c616b86`）。
 - 模型卡把该模型定位为攻击性安全模型，工作会话里曾多次被安全分类器中断（写大图测试脚本、读服务层响应代码、复现失败项时），原因不明；大图测试后来用 `handoff/scripts/mem_test.py` 完成。

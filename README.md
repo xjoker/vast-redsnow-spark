@@ -118,6 +118,7 @@ curl -N <BASE_URL>/chat/completions \
 | `GPU_SPLIT_GB` | 空，实际用 `112` | 显存切分（`-gs`），对齐上游 `serve.sh`；填了才覆盖 |
 | `CACHE_SIZE` | `262144` | KV 缓存和 `--max-model-len`（token）。KV 启动时一次分配，上下文变长不涨内存 |
 | `NUM_DRAFT_TOKENS` | `2` | MTP 草稿 token 数 |
+| `MAX_ACTIVE_REQUESTS` | `1` | 并发槽位数：同时生成的请求数，其余排队；正整数。`-ambs` 同值，加载时按它预留内存。默认 1；调大会多占内存，性能对比见实测（待补） |
 | `VISION` | `1` | `1` 加载视觉塔，接受 `image_url`；`0` 省内存，带图请求返回 400 |
 | `MAX_IMAGE_TOKENS` | 空，处理器默认 8000 | 单图 token 上限，正整数；越大越吃统一内存 |
 | `PROXY_PORT` | `8898` | 认证代理端口，监听 `0.0.0.0` |
@@ -131,11 +132,14 @@ curl -N <BASE_URL>/chat/completions \
 | `SSH_PASSWORD` | 空 | 隧道用户的密码（至少 12 字符，不能含换行）。空则该用户不能用密码登录 |
 | `SSH_USER_PUBLIC_KEY` | 空 | 隧道用户的公钥，可与密码并用。`SSH_PASSWORD` 和它都空时不创建隧道用户 |
 | `SSH_TUNNELS` | 空，等于 `127.0.0.1:$PROXY_PORT` | 隧道用户允许转发的目标，逗号分隔，最多 16 个 |
-| `ET_NETWORK_NAME` | 空 | EasyTier 网络名；与 `ET_NETWORK_SECRET` 都填才启动，都空则不启动 |
-| `ET_NETWORK_SECRET` | 空 | EasyTier 网络密钥 |
-| `ET_PEERS` | 空 | 逗号分隔的对端；空则只监听 tcp/udp 11010 等别人来连 |
-| `ET_IPV4` | 空 | 虚拟网地址（如 `10.144.144.2/24`）；空且有 `/dev/net/tun` 时自动 DHCP |
-| `ET_HOSTNAME` | `redsnow` | EasyTier 节点名 |
+| `EASYTIER_NETWORK_NAME` | 空 | EasyTier 网络名；与 `EASYTIER_NETWORK_SECRET` 都填才启动，都空则不启动，只填一个则启动时 warn 并不启动 |
+| `EASYTIER_NETWORK_SECRET` | 空 | EasyTier 网络密钥，不进日志，不写入 `/etc/environment` |
+| `EASYTIER_PEERS` | 空 | 逗号分隔，`tcp://host:port` 或 `udp://host:port`，格式不对启动即退出。空则只监听 tcp/udp 11010 等别人来连。peer 要填公网可达地址，填 `127.0.0.1` 无效 |
+| `EASYTIER_IPV4` | 空 | 固定虚拟网地址（如 `10.144.144.2/24`）；空则 DHCP |
+| `EASYTIER_HOSTNAME` | `redsnow` | EasyTier 节点名 |
+| `EASYTIER_PRIVATE_MODE` | `1` | `1` 私有模式，密钥不同的节点连入会被拒绝；`0` 关闭。只接受 0/1 |
+
+入口把以上 `EASYTIER_*` 映射成 `easytier-core` 自己读取的 `ET_*`，用户侧不再使用 `ET_*`。容器没有 `/dev/net/tun` 和 `CAP_NET_ADMIN`，所以只能 no-tun：节点拿到虚拟 IP 后，其它节点才能经虚拟 IP 访问 `PROXY_PORT`；没有虚拟 IP 的节点只转发、不可达。入口在启动后最多 60 秒内读取虚拟 IP，写入 `/run/redsnow/easytier_ip`，打印 `EasyTier 已入网` 横幅，并在就绪横幅和指标行里显示。
 
 镜像内固定、可用环境变量覆盖的两项：`EXL3_UMA=1`（exllamav3 按 `MemAvailable` 判断内存余量，页缓存可回收，新下载完权重后可直接加载；设 `0` 回到 CUDA 空闲显存检查，空闲比切分少 2 GiB 以上会加载失败）和 `TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas`。启动后运行参数写入容器内 `/etc/environment`（权限 600）。入口不接受启动参数。
 
@@ -147,7 +151,7 @@ curl -N <BASE_URL>/chat/completions \
 | Cloudflare 具名隧道 | 你自己的主机名 | 设 `CF_TUNNEL_TOKEN`；在 Cloudflare 控制台把服务地址填成 `http://localhost:8898` |
 | Vast 直连 | `http://<PUBLIC_IPADDR>:<VAST_TCP_PORT_8898>` | 外部端口随机，启动日志的 `Vast API` 行给出；HTTP 明文，token 会明文传输 |
 | SSH 隧道 | `http://127.0.0.1:8898`（本机转发） | 见下 |
-| EasyTier | 虚拟网地址 + `PROXY_PORT` | 设 `ET_NETWORK_NAME` 和 `ET_NETWORK_SECRET`；鉴权与其他方式相同 |
+| EasyTier | 虚拟 IP + `PROXY_PORT`（同网节点） | 设 `EASYTIER_NETWORK_NAME` 和 `EASYTIER_NETWORK_SECRET`；虚拟 IP 见横幅的 `EasyTier` 行；鉴权与其他方式相同 |
 
 所有方式都要 Bearer。就绪横幅优先给隧道地址，Vast 直连作为备用 URL。
 

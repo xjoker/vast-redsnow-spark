@@ -118,37 +118,109 @@ rm -rf "$root"
 ( unset API_TOKEN; main ) >/tmp/redsnow-token.out 2>/tmp/redsnow-token.err && fail "token should be required"
 grep -q "API_TOKEN" /tmp/redsnow-token.err || fail "token error text"
 
-(
-  ET_NETWORK_NAME=net ET_NETWORK_SECRET=UNIQUESECRET ET_ENABLE_EXIT_NODE=true ET_EXIT_NODES=10.0.0.9
-  unset ET_IPV4 ET_DHCP ET_NO_TUN ET_HOSTNAME ET_DEV_NAME
-  have_tun() { return 0; }
-  prepare_easytier
-  [[ "${ET_DHCP:-}" == "true" ]] || fail "dhcp"
-  [[ -z "${ET_ENABLE_EXIT_NODE:-}" && -z "${ET_EXIT_NODES:-}" ]] || fail "exit node leaked"
-  [[ "$ET_NETWORK_SECRET" == "UNIQUESECRET" ]] || fail "secret changed"
-  [[ "$ET_DEV_NAME" == "ets0" ]] || fail "dev"
-) || fail "easytier with tun"
+# EasyTier：桩 easytier-core 把收到的 ET_* 写到文件，桩 easytier-cli 给出虚拟 IP。
+# env -i 隔离宿主环境，避免读到本机残留的 ET_* / EASYTIER_* 变量。
+et_dir=$(mktemp -d)
+cat >"$et_dir/easytier-core" <<'EOF'
+#!/bin/bash
+env | grep '^ET_' | sort >"$ET_STUB_ENV"
+EOF
+cat >"$et_dir/easytier-cli" <<'EOF'
+#!/bin/bash
+printf '{"ipv4_addr": "10.144.144.7/24"}\n'
+EOF
+chmod +x "$et_dir/easytier-core" "$et_dir/easytier-cli"
+# 参数：TUN（1 有 tun，0 无）、ET_* 输出文件，其余为环境变量赋值。
+run_easytier() {
+  local tun="$1" out="$2"
+  shift 2
+  env -i PATH="$et_dir:/usr/bin:/bin" ET_STUB_ENV="$out" TUN="$tun" \
+    EASYTIER_IP_FILE="$et_dir/ip" "$@" \
+    "$BASH" -c 'source ./entrypoint.sh; have_tun() { [[ "$TUN" == 1 ]]; }; prepare_easytier && easytier-core'
+}
+has_line() { grep -qx -- "$2" "$1"; }
 
-(
-  ET_NETWORK_NAME=net ET_NETWORK_SECRET=UNIQUESECRET ET_PEERS='tcp://a:11010,udp://b:11010'
-  unset ET_IPV4 ET_DHCP ET_NO_TUN
-  have_tun() { return 1; }
-  prepare_easytier
-  [[ "${ET_NO_TUN:-}" == "true" ]] || fail "no tun"
-  [[ -z "${ET_DHCP:-}" ]] || fail "dhcp without tun"
-  [[ "$ET_PEERS" == 'tcp://a:11010,udp://b:11010' ]] || fail "peers rewritten"
-) || fail "easytier without tun"
+stale_ip="$et_dir/ip"
+printf '10.144.144.99\n' >"$stale_ip"
+rc=0
+run_easytier 1 "$et_dir/none.env" 2>"$et_dir/none.err" || rc=$?
+[[ "$rc" -ne 0 ]] || fail "none should not start"
+[[ ! -e "$et_dir/none.env" ]] || fail "none started core"
+[[ "$(grep -c . "$et_dir/none.err")" == 1 ]] || fail "none should log one line"
+grep -q 'EasyTier 未配置' "$et_dir/none.err" || fail "none text"
+[[ ! -e "$stale_ip" ]] || fail "stale vip file kept"
 
-(
-  unset ET_NETWORK_NAME ET_NETWORK_SECRET
-  if prepare_easytier; then fail "should not start"; fi
-) || fail "easytier absent"
+rc=0
+run_easytier 1 "$et_dir/half.env" EASYTIER_NETWORK_NAME=onlyname 2>"$et_dir/half.err" || rc=$?
+[[ "$rc" -ne 0 ]] || fail "half should not start"
+[[ ! -e "$et_dir/half.env" ]] || fail "half started core"
+grep -q 'warn' "$et_dir/half.err" || fail "half should warn"
 
+run_easytier 0 "$et_dir/full.env" EASYTIER_NETWORK_NAME=net EASYTIER_NETWORK_SECRET=UNIQUESECRET \
+  EASYTIER_PEERS='tcp://a:11010,udp://b:11010' 2>"$et_dir/full.err" || fail "full config should start"
+has_line "$et_dir/full.env" 'ET_NETWORK_NAME=net' || fail "network name mapped"
+has_line "$et_dir/full.env" 'ET_NETWORK_SECRET=UNIQUESECRET' || fail "network secret mapped"
+has_line "$et_dir/full.env" 'ET_HOSTNAME=redsnow' || fail "default hostname"
+has_line "$et_dir/full.env" 'ET_PRIVATE_MODE=true' || fail "default private mode"
+has_line "$et_dir/full.env" 'ET_DHCP=true' || fail "dhcp without ipv4"
+has_line "$et_dir/full.env" 'ET_NO_TUN=true' || fail "no tun"
+has_line "$et_dir/full.env" 'ET_PEERS=tcp://a:11010,udp://b:11010' || fail "peers verbatim"
+grep -q '^ET_IPV4=' "$et_dir/full.env" && fail "ipv4 should be unset"
+grep -q UNIQUESECRET "$et_dir/full.err" && fail "secret leaked to log"
+
+run_easytier 1 "$et_dir/ipv4.env" EASYTIER_NETWORK_NAME=net EASYTIER_NETWORK_SECRET=s \
+  EASYTIER_IPV4=10.144.144.2/24 2>/dev/null || fail "ipv4 config should start"
+has_line "$et_dir/ipv4.env" 'ET_IPV4=10.144.144.2/24' || fail "ipv4 mapped"
+grep -q '^ET_DHCP=' "$et_dir/ipv4.env" && fail "dhcp with fixed ipv4"
+grep -q '^ET_NO_TUN=' "$et_dir/ipv4.env" && fail "no-tun with tun"
+
+run_easytier 1 "$et_dir/dhcp-tun.env" EASYTIER_NETWORK_NAME=net EASYTIER_NETWORK_SECRET=s \
+  2>/dev/null || fail "tun dhcp should start"
+has_line "$et_dir/dhcp-tun.env" 'ET_DHCP=true' || fail "dhcp with tun"
+
+run_easytier 1 "$et_dir/private0.env" EASYTIER_NETWORK_NAME=net EASYTIER_NETWORK_SECRET=s \
+  EASYTIER_PRIVATE_MODE=0 2>/dev/null || fail "private mode 0 should start"
+has_line "$et_dir/private0.env" 'ET_PRIVATE_MODE=false' || fail "private mode 0 mapped"
+
+vip="$(PATH="$et_dir:$PATH" easytier_vip)" || fail "easytier_vip failed"
+[[ "$vip" == "10.144.144.7" ]] || fail "vip mask stripped: $vip"
+
+rm -f "$et_dir/ip"
+PATH="$et_dir:$PATH" PROXY_PORT=8898 EASYTIER_IP_FILE="$et_dir/ip" \
+  watch_easytier_vip 2>"$et_dir/watch.err"
+[[ "$(cat "$et_dir/ip")" == "10.144.144.7" ]] || fail "vip file"
+grep -q 'EasyTier 已入网' "$et_dir/watch.err" || fail "vip banner title"
+grep -q 'http://10.144.144.7:8898/v1' "$et_dir/watch.err" || fail "vip banner access"
+
+conn_out="$(EASYTIER_IP_FILE="$et_dir/ip" PROXY_PORT=8898 CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 \
+  TUNNEL_URL_FILE="$et_dir/no-url" connect_lines)"
+grep -q 'EasyTier  http://10.144.144.7:8898/v1' <<<"$conn_out" || fail "connect lines easytier"
+grep -q '并发      1 个请求同时生成' <<<"$conn_out" || fail "connect lines concurrency"
+
+for bad_peers in 'http://x:1' 'tcp://x' 'tcp://a:1,, udp://b:2'; do
+  (
+    API_TOKEN=tok EASYTIER_PEERS="$bad_peers"
+    rc=0
+    (main) >/dev/null 2>"$et_dir/peer.err" || rc=$?
+    [[ "$rc" -eq 1 ]] && grep -q 'EASYTIER_PEERS' "$et_dir/peer.err"
+  ) || fail "bad peer rejected: $bad_peers"
+done
 (
-  ET_NETWORK_NAME=onlyname
-  unset ET_NETWORK_SECRET
-  if prepare_easytier; then fail "half should not start"; fi
-) || fail "easytier half"
+  API_TOKEN=tok EASYTIER_PRIVATE_MODE=2
+  rc=0
+  (main) >/dev/null 2>"$et_dir/pm.err" || rc=$?
+  [[ "$rc" -eq 1 ]] && grep -q 'EASYTIER_PRIVATE_MODE' "$et_dir/pm.err"
+) || fail "private mode validation"
+(
+  API_TOKEN=tok MAX_ACTIVE_REQUESTS=abc
+  rc=0
+  (main) >/dev/null 2>"$et_dir/max.err" || rc=$?
+  [[ "$rc" -eq 1 ]] && grep -q 'MAX_ACTIVE_REQUESTS' "$et_dir/max.err"
+) || fail "max active requests validation"
+grep -q 'MAX_ACTIVE_REQUESTS="${MAX_ACTIVE_REQUESTS:-1}"' entrypoint.sh || fail "max active default"
+grep -q -- '--max-active-requests "${MAX_ACTIVE_REQUESTS}" -ambs "${MAX_ACTIVE_REQUESTS}"' entrypoint.sh || fail "max active serve args"
+if grep -Eq '[$][{]?ET_' entrypoint.sh; then fail "reads user ET_ variables"; fi
+rm -rf "$et_dir"
 
 valid_permit_open "127.0.0.1:8898" || fail "permit local"
 valid_permit_open "10.144.144.2:1" || fail "permit overlay"
@@ -245,7 +317,7 @@ valid_ssh_user tunnel || fail "tunnel user"
 sshd_at=$(awk '/^main\(\)/{p=1} p && /start_sshd_daemon/{print NR; exit}' entrypoint.sh)
 model_at=$(awk '/^main\(\)/{p=1} p && /ensure_model_dir/{print NR; exit}' entrypoint.sh)
 cuda_at=$(awk '/^main\(\)/{p=1} p && /read_free_gib/{print NR; exit}' entrypoint.sh)
-net_at=$(awk '/^main\(\)/{p=1} p && /easytier-core/{print NR; exit}' entrypoint.sh)
+net_at=$(awk '/^main\(\)/{p=1} p && /start_easytier/{print NR; exit}' entrypoint.sh)
 serve_at=$(awk '/^main\(\)/{p=1} p && /serve_glm.py/{print NR; exit}' entrypoint.sh)
 [[ -n "$sshd_at" && -n "$model_at" && -n "$cuda_at" && -n "$net_at" && -n "$serve_at" ]] || fail "startup markers"
 [[ "$sshd_at" -lt "$model_at" && "$model_at" -lt "$cuda_at" && "$cuda_at" -lt "$serve_at" ]] || fail "startup order"
@@ -415,7 +487,7 @@ grep -q 'GET /v1/models' <<<"$health_out" || fail "upstream access kept"
 tunnel_dir=$(mktemp -d)
 printf 'https://a-b.trycloudflare.com\n' >"$tunnel_dir/url"
 ready_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
-  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 VISION=1 CF_TUNNEL=1 CF_TUNNEL_TOKEN= \
+  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 VISION=1 CF_TUNNEL=1 CF_TUNNEL_TOKEN= \
      PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
      PROXY_PORT=8898 TUNNEL_URL_FILE="$tunnel_dir/url" format_serve_output) 2>&1)
 grep -q '模型就绪：接入信息' <<<"$ready_out" || fail "ready banner"
@@ -433,14 +505,14 @@ rm -rf "$tunnel_dir"
 
 vast_dir=$(mktemp -d)
 vast_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
-  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 CF_TUNNEL=0 \
+  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 CF_TUNNEL=0 \
      PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
      PROXY_PORT=8898 TUNNEL_URL_FILE="$vast_dir/none" format_serve_output) 2>&1)
 grep -q 'Base URL  http://1.2.3.4:33526/v1' <<<"$vast_out" || fail "vast base url"
 grep -q '推荐 stream: true' <<<"$vast_out" || fail "vast stream hint"
 if grep -q '备用 URL' <<<"$vast_out"; then fail "vast-only should have no backup"; fi
 vision_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
-  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 VISION=0 CF_TUNNEL=0 \
+  | (API_TOKEN=secret-xyz CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 VISION=0 CF_TUNNEL=0 \
      PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
      PROXY_PORT=8898 TUNNEL_URL_FILE="$vast_dir/none" format_serve_output) 2>&1)
 if grep -q '图片' <<<"$vision_out"; then fail "vision off should not advertise images"; fi
