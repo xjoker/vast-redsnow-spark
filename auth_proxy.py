@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Bearer 门。推理进程只听 127.0.0.1；这层可以再绑到虚拟网地址，不能绑 0.0.0.0。"""
+"""Bearer 门。推理进程只听 127.0.0.1。这层默认听 0.0.0.0，请求必须带 API_TOKEN。"""
 
 from __future__ import annotations
 
 import hmac
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,12 +38,14 @@ DROP_HEADERS = {
 
 
 def authorized(header: str) -> bool:
+    if not TOKEN:
+        return False
     return hmac.compare_digest(header, f"Bearer {TOKEN}")
 
 
 def check_bind_host(host: str) -> str:
-    if host in {"0.0.0.0", "::", ""}:
-        raise SystemExit("auth proxy must not bind all interfaces")
+    if host in {"::", ""}:
+        raise SystemExit(f"认证代理绑定地址无效: {host!r}")
     return host
 
 
@@ -61,7 +64,8 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:
-        sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        sys.stderr.write("%s [redsnow] %s %s\n" % (stamp, self.address_string(), fmt % args))
 
     def reject(self, status: int, message: str) -> None:
         body = ('{"error":{"message":"%s","type":"server_error"}}' % message).encode()
@@ -82,7 +86,14 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ALLOWED:
             self.reject(404, "not found")
             return
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            self.reject(400, "bad content length")
+            return
+        if length < 0:
+            self.reject(400, "bad content length")
+            return
         payload = self.rfile.read(length) if length else None
         request = urllib.request.Request(
             UPSTREAM + self.path, data=payload, method=self.command
@@ -97,7 +108,16 @@ class Handler(BaseHTTPRequestHandler):
             upstream = urllib.request.urlopen(request, timeout=proxy_timeout())
         except urllib.error.HTTPError as exc:
             upstream = exc
-        except urllib.error.URLError:
+        except urllib.error.URLError as exc:
+            sys.stderr.write(
+                "%s [redsnow] 上游不可达 %s %s: %s\n"
+                % (
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    self.command,
+                    self.path,
+                    exc.reason,
+                )
+            )
             self.reject(503, "model is still loading")
             return
         self.send_response(upstream.status)
@@ -125,9 +145,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    host = check_bind_host(os.environ.get("PROXY_HOST", "127.0.0.1"))
+    if not TOKEN:
+        raise SystemExit("需要环境变量 API_TOKEN")
+    host = check_bind_host(os.environ.get("PROXY_HOST", "0.0.0.0"))
     port = int(os.environ["PROXY_PORT"])
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    sys.stderr.write(
+        "%s [redsnow] 认证代理监听 %s:%s 上游 %s\n"
+        % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), host, port, UPSTREAM)
+    )
+    try:
+        ThreadingHTTPServer((host, port), Handler).serve_forever()
+    except OSError as exc:
+        raise SystemExit(f"认证代理无法监听 {host}:{port}: {exc}") from exc
 
 
 if __name__ == "__main__":

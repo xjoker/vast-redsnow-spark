@@ -1,6 +1,15 @@
 #!/bin/bash
-# 容器内直接启动推理。对外网络只接 EasyTier。推理只听 127.0.0.1。
+# 容器内直接启动推理。推理只听 127.0.0.1。认证代理听 0.0.0.0，必须带 API_TOKEN。
+# EasyTier 留空则用服务器 IP 和认证端口。
 set -euo pipefail
+
+log() {
+  printf '%s [redsnow] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
+}
+
+DOWNLOAD_MODEL_PY="${DOWNLOAD_MODEL_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/download_model.py}"
+MODEL_REPO_DEFAULT="vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw"
+MODEL_REVISION_DEFAULT="071adefe6c1c8de379d76977985811b7d4385454"
 
 have_tun() {
   [[ -c /dev/net/tun ]]
@@ -24,6 +33,81 @@ resolve_model_dir() {
     fi
   done
   return 1
+}
+
+model_is_complete() {
+  python3 "$DOWNLOAD_MODEL_PY" --check "$1" >/dev/null
+}
+
+pick_complete_model() {
+  local candidate
+  for candidate in "$@"; do
+    [[ -n "$candidate" ]] || continue
+    if model_is_complete "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 显式目录优先。否则用已挂上的持久盘，避免把约 97GiB 写进容器层。
+download_target() {
+  local explicit="$1" data_dir="$2" vault="$3" workspace="$4"
+  if [[ -n "$explicit" ]]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  if [[ -n "$data_dir" && -d "$data_dir" ]]; then
+    printf '%s\n' "${data_dir}/models/${MODEL_NAME}"
+    return 0
+  fi
+  if [[ -d "$vault" ]]; then
+    printf '%s\n' "${vault}/models/${MODEL_NAME}"
+    return 0
+  fi
+  if [[ -d "$workspace" ]]; then
+    printf '%s\n' "${workspace}/models/${MODEL_NAME}"
+    return 0
+  fi
+  log "没有可写的模型目录。设置 MODEL_DIR，或挂载 /vault、/workspace。"
+  return 1
+}
+
+ensure_model_dir() {
+  local dest="" found="" data_models=""
+  if [[ -n "${MODEL_DIR:-}" ]]; then
+    if model_is_complete "$MODEL_DIR"; then
+      log "使用已有模型 ${MODEL_DIR}"
+      printf '%s\n' "$MODEL_DIR"
+      return 0
+    fi
+    dest="$MODEL_DIR"
+    log "MODEL_DIR 不完整，将下载到 ${dest}"
+  else
+    if [[ -n "${DATA_DIRECTORY:-}" ]]; then
+      data_models="${DATA_DIRECTORY}/models/${MODEL_NAME}"
+    fi
+    if found="$(pick_complete_model "$data_models" "/vault/models/${MODEL_NAME}" "/workspace/models/${MODEL_NAME}")"; then
+      log "使用已有模型 ${found}"
+      printf '%s\n' "$found"
+      return 0
+    fi
+    log "未找到完整模型。候选：${data_models:-<无 DATA_DIRECTORY>} /vault/models/${MODEL_NAME} /workspace/models/${MODEL_NAME}"
+    dest="$(download_target "" "${DATA_DIRECTORY:-}" /vault /workspace)"
+  fi
+  log "开始下载 repo=${MODEL_REPO} revision=${MODEL_REVISION} 目录=${dest} 线程=${MODEL_DOWNLOAD_WORKERS}"
+  python3 "$DOWNLOAD_MODEL_PY" \
+    --repo "$MODEL_REPO" \
+    --revision "$MODEL_REVISION" \
+    --dest "$dest" \
+    --workers "$MODEL_DOWNLOAD_WORKERS" >&2
+  if ! model_is_complete "$dest"; then
+    log "下载结束但模型仍不完整: ${dest}"
+    return 1
+  fi
+  log "模型下载完成 ${dest}"
+  printf '%s\n' "$dest"
 }
 
 install_ssh_pubkey() {
@@ -82,7 +166,7 @@ tunnel_targets() {
     [[ -n "$trimmed" ]] || continue
     count=$((count + 1))
     if ((count > 16)); then
-      echo "SSH_TUNNELS 超过 16 个目标" >&2
+      log "SSH_TUNNELS 超过 16 个目标"
       return 1
     fi
     printf '%s\n' "$trimmed"
@@ -118,27 +202,27 @@ tunnel_sshd_block() {
   local password="${SSH_PASSWORD:-}" pubkey="${SSH_USER_PUBLIC_KEY:-}"
   if [[ -z "$password" && -z "$pubkey" ]]; then
     if [[ -n "${SSH_USER:-}" || -n "${SSH_TUNNELS:-}" ]]; then
-      echo "warn: 要建隧道用户，还要填 SSH_PASSWORD 或 SSH_USER_PUBLIC_KEY。" >&2
+      log "warn: 要建隧道用户，还要填 SSH_PASSWORD 或 SSH_USER_PUBLIC_KEY。"
     fi
     return 1
   fi
   local user="${SSH_USER:-tunnel}"
   if ! valid_ssh_user "$user"; then
-    echo "SSH_USER 无效: ${user}。小写字母开头，不能是 root。" >&2
+    log "SSH_USER 无效: ${user}。小写字母开头，不能是 root。"
     return 2
   fi
   if [[ "$password" == *$'\n'* || "$password" == *$'\r'* ]]; then
-    echo "SSH_PASSWORD 不能包含换行" >&2
+    log "SSH_PASSWORD 不能包含换行"
     return 2
   fi
   if [[ -n "$password" && ${#password} -lt 12 ]]; then
-    echo "warn: SSH_PASSWORD 短于 12 字符。22 端口在租用平台上常常是公网。" >&2
+    log "warn: SSH_PASSWORD 短于 12 字符。22 端口在租用平台上常常是公网。"
   fi
   local targets_text="" targets_rc=0 line
   targets_text="$(tunnel_targets "${SSH_TUNNELS:-}" "${PROXY_PORT:-8898}")" || targets_rc=$?
   if [[ "$targets_rc" -ne 0 || -z "$targets_text" ]]; then
     if [[ -z "$targets_text" ]]; then
-      echo "SSH_TUNNELS 是空的" >&2
+      log "SSH_TUNNELS 是空的"
     fi
     return 2
   fi
@@ -146,7 +230,7 @@ tunnel_sshd_block() {
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     if ! valid_permit_open "$line"; then
-      echo "SSH_TUNNELS 目标无效: ${line}" >&2
+      log "SSH_TUNNELS 目标无效: ${line}"
       return 2
     fi
     targets+=("$line")
@@ -214,49 +298,65 @@ activate_tunnel_user() {
       upsert_sshd_tunnel /etc/ssh/sshd_config ""
     fi
     if [[ "$rc" -eq 2 ]]; then
-      echo "warn: 隧道用户这次不启用。推理继续。" >&2
+      log "warn: 隧道用户这次不启用。推理继续。"
     fi
     return 0
   fi
   if [[ ! -f /etc/ssh/sshd_config ]]; then
-    echo "warn: 没有 /etc/ssh/sshd_config，隧道用户不启用。" >&2
+    log "warn: 没有 /etc/ssh/sshd_config，隧道用户不启用。"
     return 0
   fi
   upsert_sshd_tunnel /etc/ssh/sshd_config "$block"
   if [[ -x /usr/sbin/sshd ]] && ! /usr/sbin/sshd -t; then
-    echo "warn: sshd 拒绝隧道配置，已撤回。" >&2
+    log "warn: sshd 拒绝隧道配置，已撤回。"
     upsert_sshd_tunnel /etc/ssh/sshd_config ""
     return 0
   fi
   local user="${SSH_USER:-tunnel}"
   if ! ensure_tunnel_user "$user" "${SSH_PASSWORD:-}" "${SSH_USER_PUBLIC_KEY:-}"; then
-    echo "warn: 建隧道用户失败。推理继续。" >&2
+    log "warn: 建隧道用户失败。推理继续。"
     upsert_sshd_tunnel /etc/ssh/sshd_config ""
     return 0
   fi
   local first
   first="$(tunnel_targets "${SSH_TUNNELS:-}" "${PROXY_PORT:-8898}")"
   first="${first%%$'\n'*}"
-  echo "隧道用户 ${user} 已就绪，sudo 免密码。ssh ${user}@<主机> 之后 sudo -i。转发：ssh -N -L <本地端口>:${first} ${user}@<主机>" >&2
+  log "隧道用户 ${user} 已就绪，sudo 免密码。ssh ${user}@<主机> 之后 sudo -i。转发：ssh -N -L <本地端口>:${first} ${user}@<主机>"
+}
+
+# Vast 在启动时注入公网地址和随机外部端口。没有这些变量时不记。
+log_vast_access() {
+  local ip="${PUBLIC_IPADDR:-}" ssh_ext="${VAST_TCP_PORT_22:-}"
+  local api_name="VAST_TCP_PORT_${PROXY_PORT:-8898}" api_ext=""
+  if [[ -v "$api_name" ]]; then
+    api_ext="${!api_name}"
+  fi
+  [[ -n "$ip" ]] || return 0
+  if [[ -n "$ssh_ext" ]]; then
+    log "Vast SSH：ssh -p ${ssh_ext} root@${ip} 。root 只用账号公钥。密码登录是镜像内的用户，不是 root。"
+  fi
+  if [[ -n "$api_ext" ]]; then
+    log "Vast API：http://${ip}:${api_ext} 对应容器端口 ${PROXY_PORT:-8898}。请求头 Authorization: Bearer，值是 API_TOKEN。这条映射是 HTTP。"
+  fi
 }
 
 start_sshd_daemon() {
   mkdir -p /var/run/sshd
   # 主机密钥按容器生成。打进镜像的话，所有拉取同一 tag 的机器会共用一把私钥。
   if command -v ssh-keygen >/dev/null 2>&1; then
-    ssh-keygen -A || echo "warn: 没能生成 SSH 主机密钥。" >&2
+    ssh-keygen -A || log "warn: 没能生成 SSH 主机密钥。"
   fi
   if [[ ! -x /usr/sbin/sshd ]]; then
-    echo "warn: 镜像里没有 sshd。" >&2
+    log "warn: 镜像里没有 sshd。"
     return 0
   fi
   if ! /usr/sbin/sshd -t; then
-    echo "warn: sshd 配置无效。" >&2
+    log "warn: sshd 配置无效。"
     return 0
   fi
   if command -v pgrep >/dev/null 2>&1 && pgrep -x sshd >/dev/null 2>&1; then
     pkill -HUP -x sshd || true
-    echo "sshd 已在运行，已重新加载。现在可以连 22。" >&2
+    log "sshd 已在运行，已重新加载。现在可以连 22。"
     return 0
   fi
   (
@@ -273,14 +373,14 @@ start_sshd_daemon() {
         fails=0
       fi
       if ((fails >= 3)); then
-        echo "warn: sshd 连续启动失败。若 22 已被占用，沿用已有的 sshd。" >&2
+        log "warn: sshd 连续启动失败。若 22 已被占用，沿用已有的 sshd。"
         exit 0
       fi
-      echo "warn: sshd 退出，状态 ${status:-0}，1 秒后重启" >&2
+      log "warn: sshd 退出，状态 ${status:-0}，1 秒后重启"
       sleep 1
     done
   ) &
-  echo "sshd 已在后台监听 22。模型还在加载时就可以走隧道。" >&2
+  log "sshd 已在后台监听 22。模型还在加载时就可以连。"
 }
 
 publish_runtime_env() {
@@ -299,6 +399,10 @@ publish_runtime_env() {
   done
 }
 
+read_free_gib() {
+  python3 -c 'import torch; print(int(torch.cuda.mem_get_info()[0] // 2**30))'
+}
+
 choose_gpu_split() {
   local explicit="$1" free_gib="$2"
   if [[ -n "$explicit" ]]; then
@@ -306,16 +410,11 @@ choose_gpu_split() {
     return 0
   fi
   if [[ ! "$free_gib" =~ ^[0-9]+$ ]]; then
-    echo "无法读取显存空闲 GiB: ${free_gib}" >&2
+    log "无法读取显存空闲 GiB: ${free_gib}"
     return 1
   fi
-  local gs=$((free_gib - 2))
-  if ((gs > 112)); then gs=112; fi
-  if ((gs < 1)); then
-    echo "显存空闲 ${free_gib} GiB，切分后没有可用空间" >&2
-    return 1
-  fi
-  printf '%s\n' "$gs"
+  # Weschera serve.sh 固定 -gs 112。空闲不够时由调用方警告，不改这个切分。
+  printf '112\n'
 }
 
 split_warning() {
@@ -325,8 +424,38 @@ split_warning() {
   fi
 }
 
-read_free_gib() {
-  python3 -c 'import torch; print(int(torch.cuda.mem_get_info()[0] // 2**30))'
+# 上游 serve.sh：加载前丢一次，加载过程中每 2 秒再丢，直到出现 Native API listening。
+# 必须在当前 shell 调用，结果写 DROPPER_PID。不能放进 $()，否则后台循环会随子 shell 退出。
+start_load_cache_dropper() {
+  DROPPER_PID=""
+  if ! echo 3 >/proc/sys/vm/drop_caches 2>/dev/null; then
+    log "warn: 容器内不能丢页缓存。上游 serve.sh 在加载前和加载中都会丢。切分仍用 112，不要把上下文降到 131072 当作唯一办法。"
+    return 0
+  fi
+  log "按上游 serve.sh，加载期间每 2 秒丢一次页缓存。"
+  (
+    local _
+    for _ in $(seq 1 300); do
+      echo 1 >/proc/sys/vm/drop_caches 2>/dev/null || exit 0
+      sleep 2
+    done
+  ) &
+  DROPPER_PID=$!
+}
+
+stop_load_cache_dropper() {
+  local dropper="$1" serve_pid="$2" serve_log="$3" _
+  [[ -n "$dropper" ]] || return 0
+  for _ in $(seq 1 180); do
+    if grep -q "Native API listening" "$serve_log" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$serve_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 2
+  done
+  kill "$dropper" 2>/dev/null || true
 }
 
 prepare_easytier() {
@@ -335,17 +464,17 @@ prepare_easytier() {
     return 1
   fi
   if [[ -z "$name" || -z "$secret" ]]; then
-    echo "warn: EasyTier 需要同时填写 ET_NETWORK_NAME 和 ET_NETWORK_SECRET，这次不启动。" >&2
+    log "warn: EasyTier 需要同时填写 ET_NETWORK_NAME 和 ET_NETWORK_SECRET，这次不启动。"
     return 1
   fi
   if [[ -n "${ET_ENABLE_EXIT_NODE:-}" || -n "${ET_EXIT_NODES:-}" ]]; then
-    echo "warn: 已忽略出口节点。这个容器不做流量出口。" >&2
+    log "warn: 已忽略出口节点。这个容器不做流量出口。"
     unset ET_ENABLE_EXIT_NODE ET_EXIT_NODES
   fi
   export ET_HOSTNAME="${ET_HOSTNAME:-redsnow}"
   export ET_DEV_NAME="${ET_DEV_NAME:-ets0}"
   if ! have_tun; then
-    echo "warn: 没有 /dev/net/tun，EasyTier 不建虚拟网卡。节点仍会连 peer，API 只在 127.0.0.1。" >&2
+    log "warn: 没有 /dev/net/tun，EasyTier 不建虚拟网卡。节点仍会连 peer。认证代理仍在 0.0.0.0:${PROXY_PORT:-8898}。"
     export ET_NO_TUN=true
     return 0
   fi
@@ -362,8 +491,8 @@ easytier_ipv4() {
 
 start_auth_proxy() {
   local host="$1"
-  # nohup：虚拟网地址可能在后台循环里才拿到，循环退出不能把代理一起收掉。
   PROXY_HOST="$host" nohup python3 /opt/redsnow/auth_proxy.py >/proc/1/fd/2 2>&1 &
+  log "认证代理 pid=$! 监听 ${host}:${PROXY_PORT} 上游 ${UPSTREAM}"
 }
 
 watch_easytier_proxy() {
@@ -372,85 +501,89 @@ watch_easytier_proxy() {
   for _ in $(seq 1 30); do
     ip="$(easytier_ipv4 || true)"
     if [[ -n "$ip" ]]; then
-      start_auth_proxy "$ip"
-      echo "EasyTier API http://${ip}:${PROXY_PORT}" >&2
+      log "EasyTier 地址 ${ip}。端口 ${PROXY_PORT} 已在 0.0.0.0 监听，这个地址和服务器 IP 都要带 Bearer token。"
       return 0
     fi
     sleep 1
   done
-  echo "warn: 30 秒内没有 EasyTier 地址。节点已启动，API 仍在 127.0.0.1:${PROXY_PORT}。" >&2
+  log "warn: 30 秒内没有 EasyTier 地址。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
 }
 
 main() {
   if [[ $# -gt 0 ]]; then
-    echo "忽略启动引数。上下文和显存切分请用环境变量 CACHE_SIZE、GPU_SPLIT_GB。" >&2
+    log "忽略启动引数。上下文和显存切分请用环境变量 CACHE_SIZE、GPU_SPLIT_GB。"
   fi
 
   : "${API_TOKEN:?需要环境变量 API_TOKEN}"
+  log "启动 version=${IMAGE_VERSION:-unknown}。API_TOKEN 已设置。"
 
   CACHE_SIZE="${CACHE_SIZE:-262144}"
   NUM_DRAFT_TOKENS="${NUM_DRAFT_TOKENS:-2}"
   SERVE_PORT="${SERVE_PORT:-8899}"
   PROXY_PORT="${PROXY_PORT:-8898}"
   PROXY_TIMEOUT="${PROXY_TIMEOUT:-7200}"
+  MODEL_REPO="${MODEL_REPO:-$MODEL_REPO_DEFAULT}"
+  MODEL_REVISION="${MODEL_REVISION:-$MODEL_REVISION_DEFAULT}"
+  MODEL_DOWNLOAD_WORKERS="${MODEL_DOWNLOAD_WORKERS:-8}"
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
+  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} 下载线程=${MODEL_DOWNLOAD_WORKERS}"
+  log "模型仓库 ${MODEL_REPO} 修订 ${MODEL_REVISION}"
 
-  # 22 先起来。EasyTier 在后台连，不挡住权重加载。
+  # 22 先起来。后面的下载和加载都不挡 SSH。
   install_ssh_pubkey "${SSH_PUBLIC_KEY:-}" /root/.ssh/authorized_keys
   activate_tunnel_user
   start_sshd_daemon
 
-  local data_models=""
-  if [[ -n "${DATA_DIRECTORY:-}" ]]; then
-    data_models="${DATA_DIRECTORY}/models/${MODEL_NAME}"
-  fi
-  if ! MODEL_DIR="$(resolve_model_dir "${MODEL_DIR:-}" \
-    "$data_models" \
-    "/vault/models/${MODEL_NAME}" \
-    "/workspace/models/${MODEL_NAME}")"; then
-    echo "找不到模型。填写 MODEL_DIR，或把权重放在 /vault/models/${MODEL_NAME} 或 /workspace/models/${MODEL_NAME}。" >&2
-    exit 1
-  fi
-  export MODEL_DIR
-  if [[ ! -f "${MODEL_DIR}/tokenizer_config.json" ]]; then
-    echo "模型目录不可用，缺少 tokenizer_config.json: ${MODEL_DIR}" >&2
-    exit 1
-  fi
   if [[ ! -x "$TRITON_PTXAS_PATH" ]]; then
-    echo "找不到 ptxas: ${TRITON_PTXAS_PATH}" >&2
+    log "找不到 ptxas: ${TRITON_PTXAS_PATH}"
     exit 1
   fi
+  log "ptxas ${TRITON_PTXAS_PATH}"
 
   publish_runtime_env /etc/environment \
-    API_TOKEN MODEL_DIR CACHE_SIZE NUM_DRAFT_TOKENS PROXY_PORT SERVE_PORT PROXY_TIMEOUT
+    API_TOKEN CACHE_SIZE NUM_DRAFT_TOKENS PROXY_PORT SERVE_PORT PROXY_TIMEOUT \
+    MODEL_REPO MODEL_REVISION MODEL_DOWNLOAD_WORKERS IMAGE_VERSION
   export UPSTREAM="http://127.0.0.1:${SERVE_PORT}"
-  export PROXY_PORT API_TOKEN
-  start_auth_proxy 127.0.0.1
+  export PROXY_PORT API_TOKEN PROXY_TIMEOUT
+  start_auth_proxy 0.0.0.0
+  log "用服务器 IP 和端口 ${PROXY_PORT} 访问。请求头 Authorization: Bearer，值是 API_TOKEN。不要访问 ${SERVE_PORT}，那里没有鉴权。"
+  log_vast_access
 
-  if prepare_easytier; then
-    echo "EasyTier peer 启动。默认监听 tcp/udp 11010。未设置 ET_PEERS 时只等别人来连。" >&2
+  if [[ -z "${ET_NETWORK_NAME:-}" && -z "${ET_NETWORK_SECRET:-}" ]]; then
+    log "EasyTier 未配置。走服务器 IP 和端口 ${PROXY_PORT}。"
+  elif prepare_easytier; then
+    log "EasyTier 启动。默认监听 tcp/udp 11010。未设置 ET_PEERS 时只等别人来连。认证方式与服务器 IP 相同。"
     nohup easytier-core >/proc/1/fd/2 2>&1 &
+    log "easytier-core pid=$!"
     if have_tun; then
       watch_easytier_proxy &
     fi
+  else
+    log "EasyTier 未启动。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
   fi
 
-  local free_gib gs warning
+  MODEL_DIR="$(ensure_model_dir)"
+  export MODEL_DIR
+  publish_runtime_env /etc/environment MODEL_DIR
+  log "推理将使用模型目录 ${MODEL_DIR}"
+
+  local free_gib gs warning serve_status=0 serve_log tail_pid
   free_gib="$(read_free_gib)"
   gs="$(choose_gpu_split "${GPU_SPLIT_GB:-}" "$free_gib")"
   warning="$(split_warning "$gs" "$CACHE_SIZE")"
   if [[ -n "$warning" ]]; then
-    echo "warn: ${warning}" >&2
+    log "warn: ${warning}"
   fi
-  echo "GPU_SPLIT_GB=${gs} CACHE_SIZE=${CACHE_SIZE} 空闲显存约 ${free_gib} GiB" >&2
-  if echo 3 >/proc/sys/vm/drop_caches 2>/dev/null; then
-    :
-  else
-    echo "warn: 容器内不能丢页缓存。切分按上面的空闲显存取值，不要把上下文降到 131072 当作唯一办法。" >&2
+  if (( free_gib < gs + 2 )); then
+    log "warn: 空闲 ${free_gib} GiB，上游 serve.sh 仍用 -gs ${gs}。页缓存占满时这次加载会失败。"
   fi
+  log "GPU_SPLIT_GB=${gs} CACHE_SIZE=${CACHE_SIZE} 空闲显存约 ${free_gib} GiB"
+  start_load_cache_dropper
   GPU_SPLIT_GB="$gs"
   publish_runtime_env /etc/environment GPU_SPLIT_GB
 
+  serve_log="$(mktemp)"
+  log "启动推理，参数对齐上游 serve.sh：-m ${MODEL_DIR} -gs ${gs} --cache_size ${CACHE_SIZE} --cache_quant 4 --mtp --num_draft_tokens ${NUM_DRAFT_TOKENS} --max-model-len ${CACHE_SIZE} --port ${SERVE_PORT}"
   python3 /opt/redsnow/server/serve_glm.py \
     -m "${MODEL_DIR}" \
     -gs "${gs}" \
@@ -462,10 +595,18 @@ main() {
     --host 127.0.0.1 \
     --port "${SERVE_PORT}" \
     --served-model-name RED-SNOW-5.3-FLASH-EXL3-2.49 \
-    --request-timeout 7200 &
+    --request-timeout 7200 >>"$serve_log" 2>&1 &
   local serve_pid=$!
-  echo "推理只监听 127.0.0.1:${SERVE_PORT}。对外走认证代理 ${PROXY_PORT}。权重在盘上时，加载大约还要一分钟。" >&2
-  wait "${serve_pid}"
+  tail -n +0 -F "$serve_log" >&2 &
+  tail_pid=$!
+  if [[ -n "${DROPPER_PID:-}" ]]; then
+    stop_load_cache_dropper "$DROPPER_PID" "$serve_pid" "$serve_log" &
+  fi
+  log "推理 pid=${serve_pid} 只监听 127.0.0.1:${SERVE_PORT}。对外是 0.0.0.0:${PROXY_PORT}。上游冷加载大约 4 到 6 分钟，权重已在页缓存里时大约一分钟。日志出现 Native API listening 后才能调用。"
+  wait "${serve_pid}" || serve_status=$?
+  kill "$tail_pid" ${DROPPER_PID:+"$DROPPER_PID"} 2>/dev/null || true
+  log "推理进程退出 status=${serve_status}"
+  exit "${serve_status}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

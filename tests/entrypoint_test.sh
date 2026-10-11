@@ -10,8 +10,8 @@ fail() {
 }
 
 [[ "$(choose_gpu_split "" 114)" == "112" ]] || fail "114 -> 112"
-[[ "$(choose_gpu_split "" 112)" == "110" ]] || fail "112 -> 110"
-[[ "$(choose_gpu_split "" 101)" == "99" ]] || fail "101 -> 99"
+[[ "$(choose_gpu_split "" 112)" == "112" ]] || fail "112 stays 112"
+[[ "$(choose_gpu_split "" 101)" == "112" ]] || fail "101 stays 112"
 [[ "$(choose_gpu_split 110 114)" == "110" ]] || fail "explicit"
 [[ -z "$(split_warning 110 262144)" ]] || fail "110 should not warn"
 [[ -n "$(split_warning 99 262144)" ]] || fail "99 should warn"
@@ -24,6 +24,25 @@ touch "$root/workspace/models/${MODEL_NAME}/tokenizer_config.json"
 [[ "$(resolve_model_dir "" "$root/vault/models/${MODEL_NAME}" "$root/workspace/models/${MODEL_NAME}")" == "$root/vault/models/${MODEL_NAME}" ]] || fail "vault first"
 [[ "$(resolve_model_dir "" "" "$root/missing" "$root/workspace/models/${MODEL_NAME}")" == "$root/workspace/models/${MODEL_NAME}" ]] || fail "workspace fallback"
 if resolve_model_dir "" "$root/missing"; then fail "model should be missing"; fi
+
+make_complete() {
+  local dir="$1"
+  mkdir -p "$dir"
+  printf '{}\n' >"$dir/tokenizer_config.json"
+  printf '%s\n' '{"weight_map":{"block":"model-00001-of-00015.safetensors"}}' >"$dir/model.safetensors.index.json"
+  printf x >"$dir/model-00001-of-00015.safetensors"
+}
+make_complete "$root/vault/models/${MODEL_NAME}"
+if pick_complete_model "$root/workspace/models/${MODEL_NAME}"; then fail "tokenizer only is not complete"; fi
+[[ "$(pick_complete_model "$root/workspace/models/${MODEL_NAME}" "$root/vault/models/${MODEL_NAME}")" == "$root/vault/models/${MODEL_NAME}" ]] || fail "pick complete"
+places=$(mktemp -d)
+mkdir -p "$places/data" "$places/vault" "$places/workspace"
+[[ "$(download_target /opt/weights "" "$places/no-vault" "$places/no-ws")" == "/opt/weights" ]] || fail "explicit dest"
+[[ "$(download_target "" "$places/data" "$places/vault" "$places/workspace")" == "$places/data/models/${MODEL_NAME}" ]] || fail "data dest"
+[[ "$(download_target "" "$places/missing-data" "$places/vault" "$places/workspace")" == "$places/vault/models/${MODEL_NAME}" ]] || fail "vault dest"
+[[ "$(download_target "" "" "$places/no-vault" "$places/workspace")" == "$places/workspace/models/${MODEL_NAME}" ]] || fail "workspace dest"
+if download_target "" "" "$places/no-vault" "$places/no-ws"; then fail "no dest"; fi
+rm -rf "$places"
 
 install_ssh_pubkey "ssh-ed25519 AAAA test" "$root/ssh/authorized_keys"
 install_ssh_pubkey "ssh-ed25519 AAAA test" "$root/ssh/authorized_keys"
@@ -164,11 +183,16 @@ valid_ssh_user tunnel || fail "tunnel user"
 ) || fail "too many tunnels"
 
 sshd_at=$(awk '/^main\(\)/{p=1} p && /start_sshd_daemon/{print NR; exit}' entrypoint.sh)
+model_at=$(awk '/^main\(\)/{p=1} p && /ensure_model_dir/{print NR; exit}' entrypoint.sh)
 cuda_at=$(awk '/^main\(\)/{p=1} p && /read_free_gib/{print NR; exit}' entrypoint.sh)
 net_at=$(awk '/^main\(\)/{p=1} p && /easytier-core/{print NR; exit}' entrypoint.sh)
 serve_at=$(awk '/^main\(\)/{p=1} p && /serve_glm.py/{print NR; exit}' entrypoint.sh)
-[[ -n "$sshd_at" && -n "$cuda_at" && -n "$net_at" && -n "$serve_at" ]] || fail "startup markers"
-[[ "$sshd_at" -lt "$cuda_at" && "$net_at" -lt "$serve_at" && "$cuda_at" -lt "$serve_at" ]] || fail "startup order"
+[[ -n "$sshd_at" && -n "$model_at" && -n "$cuda_at" && -n "$net_at" && -n "$serve_at" ]] || fail "startup markers"
+[[ "$sshd_at" -lt "$model_at" && "$model_at" -lt "$cuda_at" && "$cuda_at" -lt "$serve_at" ]] || fail "startup order"
+[[ "$net_at" -lt "$serve_at" ]] || fail "easytier before serve"
+grep -q 'start_auth_proxy 0.0.0.0' entrypoint.sh || fail "proxy bind"
+if grep -q 'start_auth_proxy 127.0.0.1' entrypoint.sh; then fail "proxy still loopback only"; fi
+grep -q '071adefe6c1c8de379d76977985811b7d4385454' entrypoint.sh || fail "revision pin"
 main_body=$(awk '/^main\(\)/,/^}/' entrypoint.sh)
 if grep -Eq 'start_tailscale|start_wireguard|TS_AUTHKEY|WG_|tailscaled' <<<"$main_body"; then
   fail "ablation leftover in main"
@@ -184,5 +208,30 @@ grep -q '/usr/share/licenses/easytier/GPL-3.0.txt' Dockerfile || fail "gpl text"
 grep -q '/usr/share/licenses/redsnow-server/LICENSE' Dockerfile || fail "server license"
 grep -q 'GNU LESSER GENERAL PUBLIC LICENSE' licenses/easytier-v2.6.4-LICENSE || fail "lgpl body"
 grep -q 'GNU GENERAL PUBLIC LICENSE' licenses/GPL-3.0.txt || fail "gpl body"
+grep -q 'download_model.py' Dockerfile || fail "download script in image"
+grep -q 'huggingface_hub>=0.32' Dockerfile || fail "hub pin"
+grep -q '^EXPOSE 22 8898$' Dockerfile || fail "expose"
+grep -q 'useradd --create-home --shell /bin/bash --user-group tunnel' Dockerfile || fail "builtin user"
+grep -q 'tunnel ALL=(ALL) NOPASSWD:ALL' Dockerfile || fail "builtin sudo"
+user_line=$(awk '/useradd --create-home/{print NR; exit}' Dockerfile)
+pip_line=$(awk '/pip install/{print NR; exit}' Dockerfile)
+copy_line=$(awk '/COPY auth_proxy.py/{print NR; exit}' Dockerfile)
+ver_line=$(awk '/^ENV IMAGE_VERSION=/{print NR; exit}' Dockerfile)
+[[ -n "$user_line" && -n "$pip_line" && -n "$copy_line" && -n "$ver_line" ]] || fail "layer markers"
+[[ "$user_line" -lt "$pip_line" && "$pip_line" -lt "$copy_line" && "$copy_line" -lt "$ver_line" ]] || fail "layer order"
+if awk -v cut="$copy_line" 'NR < cut && /IMAGE_VERSION/' Dockerfile | grep -q .; then
+  fail "version busts lower layers"
+fi
+PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_22=50983 VAST_TCP_PORT_8898=33526 PROXY_PORT=8898 \
+  log_vast_access >/tmp/redsnow-vast.out 2>/tmp/redsnow-vast.err
+grep -q 'ssh -p 50983 root@1.2.3.4' /tmp/redsnow-vast.err || fail "vast ssh"
+grep -q 'http://1.2.3.4:33526' /tmp/redsnow-vast.err || fail "vast api"
+if grep -q 'SSH_PASSWORD' /tmp/redsnow-vast.err; then fail "vast log leaked password"; fi
+( unset PUBLIC_IPADDR VAST_TCP_PORT_22 VAST_TCP_PORT_8898
+  log_vast_access >/tmp/redsnow-vast.out 2>/tmp/redsnow-vast.err
+  [[ ! -s /tmp/redsnow-vast.err ]] ) || fail "vast quiet off platform"
+if grep -q NGC_API_KEY .github/workflows/ci.yml .github/workflows/release.yml; then
+  fail "ngc key still required"
+fi
 
 echo "entrypoint ok"

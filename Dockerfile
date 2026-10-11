@@ -4,23 +4,21 @@ FROM --platform=linux/arm64 nvcr.io/nvidia/pytorch:26.07-py3
 ARG EXL3_REF=7c1636fead6b6d802dc3ebf0e7ef02c4e76e9c2f
 ARG SERVER_REF=b96fac226d9689c9e574f9b1b491c01d5340030d
 ARG MAX_JOBS=16
-ARG IMAGE_VERSION=20261011.1
 # 直取 Release 资产。EasyTier 标签里的 install.sh 仍会装 latest。
 ARG EASYTIER_VERSION=2.6.4
 ARG EASYTIER_SHA256=f533ec25a7ea714e09f645615012200278058525795cc3bb690ff011aec1a70f
 
 # 官方源。落到哪台边缘由发布方按部署地点解析，这里不写国家，也不用大陆镜像站。
+# 版本号不要写进这一层。写在这里的话，每次改 VERSION 都会重编下面的 CUDA 和依赖。
 ENV TORCH_CUDA_ARCH_LIST=12.1 \
     MAX_JOBS=${MAX_JOBS} \
     DEBIAN_FRONTEND=noninteractive \
     TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
     PIP_INDEX_URL=https://pypi.org/simple \
-    HF_ENDPOINT=https://huggingface.co
+    HF_ENDPOINT=https://huggingface.co \
+    PYTHONUNBUFFERED=1
 
-LABEL org.opencontainers.image.title="redsnow-spark" \
-      org.opencontainers.image.version="${IMAGE_VERSION}" \
-      org.opencontainers.image.description="RED-SNOW EXL3 on one DGX Spark for GPUtw"
-
+# 底层：系统包和内置用户。入口脚本、代理和版本号在文件末尾，改它们不会重建这里。
 COPY normalize_apt_sources.py /tmp/normalize_apt_sources.py
 RUN python3 /tmp/normalize_apt_sources.py /etc/apt/sources.list /etc/apt/sources.list.d \
  && rm -f /tmp/normalize_apt_sources.py \
@@ -31,8 +29,12 @@ RUN python3 /tmp/normalize_apt_sources.py /etc/apt/sources.list /etc/apt/sources
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /var/run/sshd \
  && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
- && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+ && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
+ && useradd --create-home --shell /bin/bash --user-group tunnel \
+ && printf '%s\n' 'tunnel ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/redsnow-tunnel \
+ && chmod 440 /etc/sudoers.d/redsnow-tunnel
 
+# 依赖层：只在钉死的版本变化时重建。
 COPY install_easytier.py /tmp/install_easytier.py
 COPY licenses/easytier-v2.6.4-LICENSE /usr/share/licenses/easytier/LICENSE
 COPY licenses/GPL-3.0.txt /usr/share/licenses/easytier/GPL-3.0.txt
@@ -54,7 +56,7 @@ RUN git clone https://github.com/vcruz305/exllamav3.git /opt/exllamav3 \
  && git -C /opt/exllamav3 checkout --detach "${EXL3_REF}" \
  && pip install --no-cache-dir --index-url https://pypi.org/simple -r /opt/exllamav3/requirements.txt \
  && pip install --no-cache-dir --index-url https://pypi.org/simple --no-build-isolation -e /opt/exllamav3 \
- && pip install --no-cache-dir --index-url https://pypi.org/simple huggingface_hub jsonschema "transformers>=5.0" jinja2 \
+ && pip install --no-cache-dir --index-url https://pypi.org/simple "huggingface_hub>=0.32" jsonschema "transformers>=5.0" jinja2 \
  && python -c "import exllamav3, exllamav3_ext, transformers; print(transformers.__version__)"
 
 RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spark.git /tmp/redsnow-src \
@@ -66,9 +68,16 @@ RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spar
  && cp /tmp/redsnow-src/LICENSE /usr/share/licenses/redsnow-server/LICENSE \
  && rm -rf /tmp/redsnow-src
 
-COPY auth_proxy.py entrypoint.sh /opt/redsnow/
+# 应用层。改入口、代理或 VERSION 只重建从这里往下的层。
+COPY auth_proxy.py download_model.py entrypoint.sh /opt/redsnow/
 RUN chmod 755 /opt/redsnow/entrypoint.sh
 
+ARG IMAGE_VERSION=20261011.1
+ENV IMAGE_VERSION=${IMAGE_VERSION}
+LABEL org.opencontainers.image.title="redsnow-spark" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.description="RED-SNOW EXL3 on one DGX Spark for GPUtw"
+
 WORKDIR /opt/redsnow
-EXPOSE 22
+EXPOSE 22 8898
 ENTRYPOINT ["/opt/redsnow/entrypoint.sh"]

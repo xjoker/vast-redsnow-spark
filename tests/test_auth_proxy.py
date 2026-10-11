@@ -11,12 +11,23 @@ import auth_proxy
 def test_bind_host():
     assert auth_proxy.check_bind_host("127.0.0.1") == "127.0.0.1"
     assert auth_proxy.check_bind_host("10.144.144.2") == "10.144.144.2"
-    for blocked in ("0.0.0.0", "::", ""):
+    assert auth_proxy.check_bind_host("0.0.0.0") == "0.0.0.0"
+    for blocked in ("::", ""):
         try:
             auth_proxy.check_bind_host(blocked)
         except SystemExit:
             continue
         raise SystemExit(f"should reject {blocked!r}")
+
+
+def test_empty_token_rejects():
+    old = auth_proxy.TOKEN
+    auth_proxy.TOKEN = ""
+    try:
+        assert auth_proxy.authorized("Bearer ") is False
+        assert auth_proxy.authorized("Bearer test-token") is False
+    finally:
+        auth_proxy.TOKEN = old
 
 
 def test_timeout_default():
@@ -32,5 +43,6 @@ def test_timeout_default():
 
 if __name__ == "__main__":
     test_bind_host()
+    test_empty_token_rejects()
     test_timeout_default()
     print("auth_proxy ok")

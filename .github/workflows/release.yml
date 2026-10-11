@@ -24,26 +24,12 @@ jobs:
             exit 1
           fi
           echo "value=${version}" >> "$GITHUB_OUTPUT"
-      - name: 需要 NGC_API_KEY
-        env:
-          NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
-        run: |
-          if [ -z "${NGC_API_KEY}" ]; then
-            echo "仓库密钥 NGC_API_KEY 为空。到 NVIDIA NGC 建 key，存进 GitHub Actions secrets。"
-            exit 1
-          fi
       - name: 登录 GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: 登录 NGC
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        with:
-          registry: nvcr.io
-          username: $oauthtoken
-          password: ${{ secrets.NGC_API_KEY }}
       - name: Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
       - name: 构建并推送
