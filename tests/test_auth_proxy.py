@@ -147,6 +147,59 @@ def test_get_model_requires_token():
     assert status == 401, status
 
 
+def test_stream_is_not_buffered():
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import urllib.request
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0") or "0"))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b'data: {"a":1}\n\n')
+            self.wfile.flush()
+            time.sleep(2)
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+        def log_message(self, *args):
+            pass
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), auth_proxy.Handler)
+    for server in (upstream, proxy):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    old_upstream = auth_proxy.UPSTREAM
+    auth_proxy.UPSTREAM = f"http://127.0.0.1:{upstream.server_port}"
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.server_port}/v1/chat/completions",
+            data=b'{"stream":true}',
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {auth_proxy.TOKEN}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            started = time.monotonic()
+            first = resp.readline()
+            elapsed = time.monotonic() - started
+            rest = resp.read()
+        assert first == b'data: {"a":1}\n', first
+        assert elapsed < 1, f"first SSE line was buffered for {elapsed:.2f}s"
+        assert b"data: [DONE]" in rest, rest
+    finally:
+        auth_proxy.UPSTREAM = old_upstream
+        for server in (proxy, upstream):
+            server.shutdown()
+            server.server_close()
+
+
 if __name__ == "__main__":
     test_bind_host()
     test_empty_token_rejects()
@@ -155,4 +208,5 @@ if __name__ == "__main__":
     test_get_model_found()
     test_get_model_not_found()
     test_get_model_requires_token()
+    test_stream_is_not_buffered()
     print("auth_proxy ok")

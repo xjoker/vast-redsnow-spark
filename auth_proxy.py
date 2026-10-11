@@ -199,8 +199,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", size)
         self.send_header("Connection", "close")
         self.end_headers()
+        # read 会凑满 65536 字节或 EOF 才返回，SSE 与 keepalive 会被攒住；read1 有多少转多少。
         while True:
-            chunk = upstream.read(65536)
+            chunk = upstream.read1(65536)
             if not chunk:
                 break
             self.wfile.write(chunk)
