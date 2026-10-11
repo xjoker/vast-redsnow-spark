@@ -276,7 +276,7 @@ index 4945f6d..dfc50fc 100755
      print(f"Native API listening {args.host}:{args.port}; max_active={args.max_active_requests}", flush=True)
      try:
 diff --git a/server/worker.py b/server/worker.py
-index 56fcb9b..23705f4 100644
+index 56fcb9b..e745c92 100644
 --- a/server/worker.py
 +++ b/server/worker.py
 @@ -64,6 +64,19 @@ class GenerationWorker:
@@ -299,11 +299,26 @@ index 56fcb9b..23705f4 100644
      def _run(self):
          active, waiting = {}, deque()
          try:
-@@ -99,9 +112,18 @@ class GenerationWorker:
+@@ -98,10 +111,32 @@ class GenerationWorker:
+                         active[ticket.identifier] = ticket
                      if not active:
                          continue
-                     for event in self.generator.iterate():
+-                    for event in self.generator.iterate():
 -                        ticket = active.get(event.get("identifier"))
++                    try:
++                        events = self.generator.iterate()
++                    except Exception as exc:
++                        if type(exc).__name__ != "OutOfMemoryError":
++                            raise
++                        # OOM in a batched forward pass hits every active job; cancelling them
++                        # frees their pages and the generator keeps serving. A failing cancel
++                        # propagates to the fail-closed handler below.
++                        for ident, ticket in list(active.items()):
++                            self.generator.cancel(ticket.job)
++                            del active[ident]
++                            self._fail_job(ticket, exc)
++                        continue
++                    for event in events:
 +                        # reap_failed_job's error event carries the job but no identifier; without
 +                        # this lookup the ticket never retires and the worker dies as "drained".
 +                        ident = event.get("identifier")
