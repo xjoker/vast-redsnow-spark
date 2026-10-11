@@ -17,14 +17,11 @@ fail() {
 [[ -n "$(split_warning 99 262144)" ]] || fail "99 should warn"
 
 root=$(mktemp -d)
-mkdir -p "$root/vault/models/${MODEL_NAME}" "$root/workspace/models/${MODEL_NAME}" "$root/workspace"
-touch "$root/vault/models/${MODEL_NAME}/tokenizer_config.json"
-touch "$root/workspace/models/${MODEL_NAME}/tokenizer_config.json"
-[[ "$(resolve_model_dir /opt/weights)" == "/opt/weights" ]] || fail "explicit model"
-[[ "$(resolve_model_dir "" "$root/vault/models/${MODEL_NAME}" "$root/workspace/models/${MODEL_NAME}")" == "$root/vault/models/${MODEL_NAME}" ]] || fail "vault first"
-[[ "$(resolve_model_dir "" "" "$root/missing" "$root/workspace/models/${MODEL_NAME}")" == "$root/workspace/models/${MODEL_NAME}" ]] || fail "workspace fallback"
-if resolve_model_dir "" "$root/missing"; then fail "model should be missing"; fi
-
+unset MODEL_DIR MODEL_DOWNLOAD
+[[ "$(locked_model_dir)" == "$MODEL_LOCK" ]] || fail "default lock"
+MODEL_DIR="$root/only-this"
+[[ "$(locked_model_dir)" == "$root/only-this" ]] || fail "explicit lock"
+mkdir -p "$root/elsewhere/models/${MODEL_NAME}"
 make_complete() {
   local dir="$1"
   mkdir -p "$dir"
@@ -32,17 +29,71 @@ make_complete() {
   printf '%s\n' '{"weight_map":{"block":"model-00001-of-00015.safetensors"}}' >"$dir/model.safetensors.index.json"
   printf x >"$dir/model-00001-of-00015.safetensors"
 }
-make_complete "$root/vault/models/${MODEL_NAME}"
-if pick_complete_model "$root/workspace/models/${MODEL_NAME}"; then fail "tokenizer only is not complete"; fi
-[[ "$(pick_complete_model "$root/workspace/models/${MODEL_NAME}" "$root/vault/models/${MODEL_NAME}")" == "$root/vault/models/${MODEL_NAME}" ]] || fail "pick complete"
-places=$(mktemp -d)
-mkdir -p "$places/data" "$places/vault" "$places/workspace"
-[[ "$(download_target /opt/weights "" "$places/no-vault" "$places/no-ws")" == "/opt/weights" ]] || fail "explicit dest"
-[[ "$(download_target "" "$places/data" "$places/vault" "$places/workspace")" == "$places/data/models/${MODEL_NAME}" ]] || fail "data dest"
-[[ "$(download_target "" "$places/missing-data" "$places/vault" "$places/workspace")" == "$places/vault/models/${MODEL_NAME}" ]] || fail "vault dest"
-[[ "$(download_target "" "" "$places/no-vault" "$places/workspace")" == "$places/workspace/models/${MODEL_NAME}" ]] || fail "workspace dest"
-if download_target "" "" "$places/no-vault" "$places/no-ws"; then fail "no dest"; fi
-rm -rf "$places"
+make_complete "$root/elsewhere/models/${MODEL_NAME}"
+if model_is_complete "$root/only-this"; then fail "empty dir is complete"; fi
+model_is_complete "$root/elsewhere/models/${MODEL_NAME}" || fail "real layout"
+
+stub=$(mktemp)
+cat >"$stub" <<'EOF'
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+if args[:1] == ["--check"]:
+    raise SystemExit(0 if Path(args[1], ".complete").is_file() else 1)
+dest = Path(args[args.index("--dest") + 1])
+dest.mkdir(parents=True, exist_ok=True)
+(dest / ".complete").write_text("ok", encoding="utf-8")
+Path("/tmp/redsnow-model-downloaded").write_text(str(dest), encoding="utf-8")
+EOF
+rm -f /tmp/redsnow-model-downloaded
+(
+  export DOWNLOAD_MODEL_PY="$stub" MODEL_DIR="$root/only-this" MODEL_DOWNLOAD=0
+  export MODEL_REPO=repo MODEL_REVISION=rev MODEL_DOWNLOAD_WORKERS=2
+  rc=0
+  out="$(ensure_model_dir 2>/tmp/redsnow-model.err)" || rc=$?
+  [[ "$rc" -eq 2 ]] || exit 1
+  [[ -z "$out" ]] || exit 1
+  grep -q "不下载" /tmp/redsnow-model.err || exit 1
+  [[ ! -f /tmp/redsnow-model-downloaded ]] || exit 1
+) || fail "download gate"
+(
+  export DOWNLOAD_MODEL_PY="$stub" MODEL_DIR="$root/ready" MODEL_DOWNLOAD=0
+  export MODEL_REPO=repo MODEL_REVISION=rev MODEL_DOWNLOAD_WORKERS=2
+  mkdir -p "$MODEL_DIR"
+  printf ok >"$MODEL_DIR/.complete"
+  rc=0
+  out="$(ensure_model_dir 2>/tmp/redsnow-model.err)" || rc=$?
+  [[ "$rc" -eq 0 && "$out" == "$root/ready" ]] || exit 1
+  [[ ! -f /tmp/redsnow-model-downloaded ]] || exit 1
+) || fail "gate still reads complete dir"
+(
+  export DOWNLOAD_MODEL_PY="$stub" MODEL_DIR="$root/fetch" MODEL_DOWNLOAD=1
+  export MODEL_REPO=repo MODEL_REVISION=rev MODEL_DOWNLOAD_WORKERS=4
+  rc=0
+  out="$(ensure_model_dir 2>/tmp/redsnow-model.err)" || rc=$?
+  [[ "$rc" -eq 0 && "$out" == "$root/fetch" ]] || exit 1
+  [[ "$(cat /tmp/redsnow-model-downloaded)" == "$root/fetch" ]] || exit 1
+) || fail "download into locked dir"
+(
+  unset MODEL_DIR
+  export DOWNLOAD_MODEL_PY="$stub" MODEL_DOWNLOAD=1
+  export MODEL_REPO=repo MODEL_REVISION=rev MODEL_DOWNLOAD_WORKERS=2
+  rm -f /tmp/redsnow-model-downloaded
+  rc=0
+  ensure_model_dir >/tmp/redsnow-model.out 2>/tmp/redsnow-model.err || rc=$?
+  [[ "$rc" -eq 2 ]] || exit 1
+  grep -q "没有挂载存储" /tmp/redsnow-model.err || exit 1
+  [[ ! -f /tmp/redsnow-model-downloaded ]] || exit 1
+) || fail "default path refuses overlay"
+(
+  export MODEL_DIR="$root/only-this" MODEL_DOWNLOAD=maybe
+  rc=0
+  ensure_model_dir >/dev/null 2>/tmp/redsnow-model.err || rc=$?
+  [[ "$rc" -eq 1 ]] || exit 1
+  grep -q "只能是 0 或 1" /tmp/redsnow-model.err || exit 1
+) || fail "bad download flag"
+unset MODEL_DIR MODEL_DOWNLOAD
 
 install_ssh_pubkey "ssh-ed25519 AAAA test" "$root/ssh/authorized_keys"
 install_ssh_pubkey "ssh-ed25519 AAAA test" "$root/ssh/authorized_keys"

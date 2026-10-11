@@ -2,14 +2,15 @@
 
 Vast.ai 和 GPUtw 上单台 DGX Spark（GB10，linux/arm64）的 RED-SNOW 推理镜像。版本在仓库根目录 `VERSION`。
 
-镜像里只有运行时和入口。权重不进镜像。启动时先找：
+镜像里只有运行时和入口。权重不进镜像。模型只认一个目录，默认是：
 
 ```text
-/vault/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw
-/workspace/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw
+/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw
 ```
 
-GPUtw 的持久盘是 `/vault`。Vast 的实例盘是 `/workspace`。`DATA_DIRECTORY` 有值时也会找它下面的 `models/`。三处都没有完整权重时，下载 `vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw` 的修订 `071adefe6c1c8de379d76977985811b7d4385454`，15 个分片同时拉取，线程数是 `MODEL_DOWNLOAD_WORKERS`（默认 8）。`MODEL_DIR` 填了就只用这个目录。下载落在 `MODEL_DIR`，否则落在已挂载的 `DATA_DIRECTORY`、`/vault`、`/workspace`。三处都没挂上时不会把约 97GiB 写进容器层，入口直接退出。
+把以后买的存储挂到 `/models`，文件就在这一层。平台盘不在这里时，用 `MODEL_DIR` 指向那块盘上的同一层目录，例如 GPUtw 的 `/vault/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw`，或 Vast 的 `/workspace/models/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw`。启动不会再去别的路径找。
+
+这个目录算完整，要同时有 `tokenizer_config.json`、`model.safetensors.index.json`，以及索引 `weight_map` 里的每个分片。齐全就直接加载。不齐全时，`MODEL_DOWNLOAD=1`（默认）把 `vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw` 的修订 `071adefe6c1c8de379d76977985811b7d4385454` 下载到这个目录，线程数是 `MODEL_DOWNLOAD_WORKERS`（默认 8）。默认路径 `/models` 必须是挂载点，否则不把约 97GiB 写进容器层。`MODEL_DOWNLOAD=0` 时就算目录是空的也不下载，不起推理，22 和认证代理继续，用来先测 SSH 和端口。
 
 运行时钉死两处提交：
 
@@ -42,7 +43,7 @@ Vast 模板选 docker ENTRYPOINT。SSH 和 Jupyter 模式会换掉镜像入口�
 
 GPUtw 用自订映像，`sshEnabled` 打开，不要开 Web UI。平台要求容器自己听 22，入口会起 sshd。`customImage.env` 最多 32 个。不要自己填 `PUBLIC_KEY`、`GATEWAY_KEY`、`NVIDIA_VISIBLE_DEVICES`、`NVIDIA_DRIVER_CAPABILITIES`，平台会拒绝。
 
-可以写进表单的变量是 `.env.example` 里的 20 个。必填只有 `API_TOKEN`。EasyTier 和隧道用户都是填了才启动，留空就跳过。其余有默认值，表单留空。密钥只放在部署表单里，不进镜像。
+可以写进表单的变量是 `.env.example` 里的 21 个。必填只有 `API_TOKEN`。EasyTier 和隧道用户都是填了才启动，留空就跳过。只测 SSH 和端口时设 `MODEL_DOWNLOAD=0`。其余有默认值，表单留空。密钥只放在部署表单里，不进镜像。
 
 构建时的 apt、pip、GitHub、Hugging Face 都用官方主机。国家代码和大陆镜像站会改回 `archive.ubuntu.com`、`ports.ubuntu.com`、`pypi.org`、`github.com`、`huggingface.co`。落到哪台边缘由这些服务自己解析，镜像里不写地区。
 

@@ -16,87 +16,54 @@ have_tun() {
 }
 
 MODEL_NAME="RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw"
+# 唯一模型目录。挂盘时把存储挂到 /models，文件就落在这一层。
+MODEL_LOCK="/models/${MODEL_NAME}"
 
-resolve_model_dir() {
-  local explicit="$1"
-  shift
-  if [[ -n "$explicit" ]]; then
-    printf '%s\n' "$explicit"
+locked_model_dir() {
+  if [[ -n "${MODEL_DIR:-}" ]]; then
+    printf '%s\n' "$MODEL_DIR"
     return 0
   fi
-  local candidate
-  for candidate in "$@"; do
-    [[ -n "$candidate" ]] || continue
-    if [[ -f "${candidate}/tokenizer_config.json" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  return 1
+  printf '%s\n' "$MODEL_LOCK"
 }
 
 model_is_complete() {
   python3 "$DOWNLOAD_MODEL_PY" --check "$1" >/dev/null
 }
 
-pick_complete_model() {
-  local candidate
-  for candidate in "$@"; do
-    [[ -n "$candidate" ]] || continue
-    if model_is_complete "$candidate"; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  return 1
+# 默认目录必须是挂载点，避免把约 97GiB 写进容器层。MODEL_DIR 由调用方指定位置。
+weights_mount_ok() {
+  local dest="$1"
+  [[ "$dest" == "$MODEL_LOCK" ]] || return 0
+  [[ -f /proc/mounts ]] || return 1
+  awk -v p="/models" '$2 == p { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts
 }
 
-# 显式目录优先。否则用已挂上的持久盘，避免把约 97GiB 写进容器层。
-download_target() {
-  local explicit="$1" data_dir="$2" vault="$3" workspace="$4"
-  if [[ -n "$explicit" ]]; then
-    printf '%s\n' "$explicit"
-    return 0
-  fi
-  if [[ -n "$data_dir" && -d "$data_dir" ]]; then
-    printf '%s\n' "${data_dir}/models/${MODEL_NAME}"
-    return 0
-  fi
-  if [[ -d "$vault" ]]; then
-    printf '%s\n' "${vault}/models/${MODEL_NAME}"
-    return 0
-  fi
-  if [[ -d "$workspace" ]]; then
-    printf '%s\n' "${workspace}/models/${MODEL_NAME}"
-    return 0
-  fi
-  log "没有可写的模型目录。设置 MODEL_DIR，或挂载 /vault、/workspace。"
-  return 1
-}
-
+# 0：目录可加载。2：不下载，调用方保持 sshd 和认证代理。1：配置或下载失败。
 ensure_model_dir() {
-  local dest="" found="" data_models=""
-  if [[ -n "${MODEL_DIR:-}" ]]; then
-    if model_is_complete "$MODEL_DIR"; then
-      log "使用已有模型 ${MODEL_DIR}"
-      printf '%s\n' "$MODEL_DIR"
-      return 0
-    fi
-    dest="$MODEL_DIR"
-    log "MODEL_DIR 不完整，将下载到 ${dest}"
-  else
-    if [[ -n "${DATA_DIRECTORY:-}" ]]; then
-      data_models="${DATA_DIRECTORY}/models/${MODEL_NAME}"
-    fi
-    if found="$(pick_complete_model "$data_models" "/vault/models/${MODEL_NAME}" "/workspace/models/${MODEL_NAME}")"; then
-      log "使用已有模型 ${found}"
-      printf '%s\n' "$found"
-      return 0
-    fi
-    log "未找到完整模型。候选：${data_models:-<无 DATA_DIRECTORY>} /vault/models/${MODEL_NAME} /workspace/models/${MODEL_NAME}"
-    dest="$(download_target "" "${DATA_DIRECTORY:-}" /vault /workspace)"
+  local dest
+  case "${MODEL_DOWNLOAD:-1}" in
+    0 | 1) ;;
+    *)
+      log "MODEL_DOWNLOAD 只能是 0 或 1，当前是 ${MODEL_DOWNLOAD}"
+      return 1
+      ;;
+  esac
+  dest="$(locked_model_dir)"
+  if model_is_complete "$dest"; then
+    log "使用已有模型 ${dest}"
+    printf '%s\n' "$dest"
+    return 0
   fi
-  log "开始下载 repo=${MODEL_REPO} revision=${MODEL_REVISION} 目录=${dest} 线程=${MODEL_DOWNLOAD_WORKERS}"
+  if [[ "${MODEL_DOWNLOAD:-1}" == "0" ]]; then
+    log "MODEL_DOWNLOAD=0，目录没有完整模型，不下载: ${dest}"
+    return 2
+  fi
+  if ! weights_mount_ok "$dest"; then
+    log "模型目录 ${dest} 没有挂载存储，不下载。把盘挂到 /models，或设置 MODEL_DIR。本次跳过推理。"
+    return 2
+  fi
+  log "目录没有完整模型，开始下载 repo=${MODEL_REPO} revision=${MODEL_REVISION} 目录=${dest} 线程=${MODEL_DOWNLOAD_WORKERS}"
   python3 "$DOWNLOAD_MODEL_PY" \
     --repo "$MODEL_REPO" \
     --revision "$MODEL_REVISION" \
@@ -524,10 +491,11 @@ main() {
   PROXY_TIMEOUT="${PROXY_TIMEOUT:-7200}"
   MODEL_REPO="${MODEL_REPO:-$MODEL_REPO_DEFAULT}"
   MODEL_REVISION="${MODEL_REVISION:-$MODEL_REVISION_DEFAULT}"
+  MODEL_DOWNLOAD="${MODEL_DOWNLOAD:-1}"
   MODEL_DOWNLOAD_WORKERS="${MODEL_DOWNLOAD_WORKERS:-8}"
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
-  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} 下载线程=${MODEL_DOWNLOAD_WORKERS}"
-  log "模型仓库 ${MODEL_REPO} 修订 ${MODEL_REVISION}"
+  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS}"
+  log "模型目录 $(locked_model_dir) 仓库 ${MODEL_REPO} 修订 ${MODEL_REVISION}"
 
   # 22 先起来。后面的下载和加载都不挡 SSH。
   install_ssh_pubkey "${SSH_PUBLIC_KEY:-}" /root/.ssh/authorized_keys
@@ -542,7 +510,7 @@ main() {
 
   publish_runtime_env /etc/environment \
     API_TOKEN CACHE_SIZE NUM_DRAFT_TOKENS PROXY_PORT SERVE_PORT PROXY_TIMEOUT \
-    MODEL_REPO MODEL_REVISION MODEL_DOWNLOAD_WORKERS IMAGE_VERSION
+    MODEL_REPO MODEL_REVISION MODEL_DOWNLOAD MODEL_DOWNLOAD_WORKERS IMAGE_VERSION
   export UPSTREAM="http://127.0.0.1:${SERVE_PORT}"
   export PROXY_PORT API_TOKEN PROXY_TIMEOUT
   start_auth_proxy 0.0.0.0
@@ -562,7 +530,16 @@ main() {
     log "EasyTier 未启动。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
   fi
 
-  MODEL_DIR="$(ensure_model_dir)"
+  local model_rc=0
+  MODEL_DIR="$(ensure_model_dir)" || model_rc=$?
+  if [[ "$model_rc" -eq 2 ]]; then
+    log "推理未启动。sshd 和认证代理继续。"
+    wait || true
+    exit 0
+  fi
+  if [[ "$model_rc" -ne 0 ]]; then
+    exit "$model_rc"
+  fi
   export MODEL_DIR
   publish_runtime_env /etc/environment MODEL_DIR
   log "推理将使用模型目录 ${MODEL_DIR}"
