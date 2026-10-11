@@ -98,7 +98,7 @@ unset MODEL_DIR MODEL_DOWNLOAD
 install_ssh_pubkey "ssh-ed25519 AAAA test" "$root/ssh/authorized_keys"
 install_ssh_pubkey "ssh-ed25519 AAAA test" "$root/ssh/authorized_keys"
 [[ "$(grep -c . "$root/ssh/authorized_keys")" == "1" ]] || fail "ssh key duplicated"
-[[ "$(stat -f '%Lp' "$root/ssh/authorized_keys" 2>/dev/null || stat -c '%a' "$root/ssh/authorized_keys")" == "600" ]] || fail "ssh key mode"
+[[ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$root/ssh/authorized_keys")" == "600" ]] || fail "ssh key mode"
 
 API_TOKEN=tok MODEL_DIR=/models SSH_PASSWORD=secret \
   publish_runtime_env "$root/environment" API_TOKEN MODEL_DIR
@@ -195,7 +195,7 @@ valid_ssh_user tunnel || fail "tunnel user"
   sudo_file="$(mktemp -d)/redsnow-tunnel"
   install_sudoers tunnel "$sudo_file"
   grep -qx 'tunnel ALL=(ALL) NOPASSWD:ALL' "$sudo_file" || fail "sudoers"
-  [[ "$(stat -f '%Lp' "$sudo_file" 2>/dev/null || stat -c '%a' "$sudo_file")" == "440" ]] || fail "sudoers mode"
+  [[ "$(python3 -c 'import os,sys; print(format(os.stat(sys.argv[1]).st_mode & 0o777, "o"))' "$sudo_file")" == "440" ]] || fail "sudoers mode"
   cfg="$(mktemp -d)/sshd_config"
   printf 'PasswordAuthentication no\n' >"$cfg"
   upsert_sshd_tunnel "$cfg" "$block"
