@@ -502,12 +502,9 @@ prepare_easytier() {
   fi
   export ET_NETWORK_NAME="$name" ET_NETWORK_SECRET="$secret"
   export ET_HOSTNAME="${EASYTIER_HOSTNAME:-redsnow}"
-  # peer 连不上时 easytier-core 每几秒打一组 INFO 重试日志，刷屏且没有可操作的信息，固定只留 warn。
-  export ET_CONSOLE_LOG_LEVEL=warn
-  # 虚拟 IP 监视每次调 easytier-cli 断开时，core 都打一条 bidirect "read aborted" WARN；
-  # 连不上的 peer 每 3 秒一条 connector::manual "reconn result" WARN。入网与否由 watch_easytier_vip 报告。
-  # ET_CONSOLE_LOG_LEVEL 只认单个级别，按模块过滤要走 RUST_LOG。
-  export RUST_LOG="warn,easytier::proto::rpc_impl::bidirect=error,easytier::connector::manual=error"
+  # warn 级别也会刷屏：死 TCP peer 每 3 秒一条 connector::manual 重连失败，死 UDP peer 每 3 秒两条 tunnel::udp，
+  # 虚拟 IP 监视每次调 easytier-cli 还有一条 bidirect "read aborted"。只留 error，入网、换 IP、掉线由 watch_easytier_vip 报告。
+  export ET_CONSOLE_LOG_LEVEL=error
   if [[ "${EASYTIER_PRIVATE_MODE:-1}" == 1 ]]; then
     export ET_PRIVATE_MODE=true
   else

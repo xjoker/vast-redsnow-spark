@@ -127,7 +127,7 @@ grep -q "API_TOKEN" /tmp/redsnow-token.err || fail "token error text"
 et_dir=$(mktemp -d)
 cat >"$et_dir/easytier-core" <<'EOF'
 #!/bin/bash
-env | grep -E '^(ET_|RUST_LOG=)' | sort >"$ET_STUB_ENV"
+env | grep '^ET_' | sort >"$ET_STUB_ENV"
 EOF
 cat >"$et_dir/easytier-cli" <<'EOF'
 #!/bin/bash
@@ -165,8 +165,7 @@ run_easytier 0 "$et_dir/full.env" EASYTIER_NETWORK_NAME=net EASYTIER_NETWORK_SEC
 has_line "$et_dir/full.env" 'ET_NETWORK_NAME=net' || fail "network name mapped"
 has_line "$et_dir/full.env" 'ET_NETWORK_SECRET=UNIQUESECRET' || fail "network secret mapped"
 has_line "$et_dir/full.env" 'ET_HOSTNAME=redsnow' || fail "default hostname"
-has_line "$et_dir/full.env" 'ET_CONSOLE_LOG_LEVEL=warn' || fail "console log level"
-has_line "$et_dir/full.env" 'RUST_LOG=warn,easytier::proto::rpc_impl::bidirect=error,easytier::connector::manual=error' || fail "rpc abort warn filtered"
+has_line "$et_dir/full.env" 'ET_CONSOLE_LOG_LEVEL=error' || fail "console log level"
 has_line "$et_dir/full.env" 'ET_PRIVATE_MODE=true' || fail "default private mode"
 has_line "$et_dir/full.env" 'ET_DHCP=true' || fail "dhcp without ipv4"
 has_line "$et_dir/full.env" 'ET_NO_TUN=true' || fail "no tun"

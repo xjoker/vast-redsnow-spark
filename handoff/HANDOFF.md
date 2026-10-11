@@ -69,6 +69,7 @@ cgroup `memory.events` 全程 oom=0；KV 缓存启动时按 `CACHE_SIZE` 一次�
 - 网页表单建 ENTRYPOINT 模式报 `unknown flag --runtime`，必须用 CLI；`--args` 不能为空，否则变成 SSH 模式。
 - ENTRYPOINT 模式 Vast 只注入账号级 SSH Keys 对应的 `SSH_PUBLIC_KEY`，`vastai attach ssh` 加到单实例的公钥不进容器。
 - `vastai update instance` 后马上 `vastai recycle instance` 可能仍用旧配置；先 `vastai show instance` 确认 `image_uuid`、`extra_env`。
+- `vastai update instance --env` 不会删掉创建时就有的变量：`extra_env` 里看不到了，容器里仍是旧值（实测 `MAX_ACTIVE_REQUESTS=4` 删不掉）。要去掉变量就显式设成默认值，或重建实例。
 - recycle 会清空容器，权重要重下；SSH 模式 recycle 后 `/root/.ssh/authorized_keys` 有时被写成宿主 uid（128:988），入口已自动改回 root（20261011.4 起）。
 - 个别主机在 SSH 模式停在 `docker_build() error writing dockerfile`（换 Ubuntu 也一样），换主机。已知坏：machine 150922；好：151363（日本）。列表上看不出，开机 3 分钟内不 running 就销毁（Loading 不计费）。
 - Vast 注入 `CONTAINER_RUNTIME=gvisor`，容器里写不了 `/proc/sys/vm/drop_caches`；新下载的权重占约 88 GiB 页缓存，靠镜像默认 `EXL3_UMA=1`（按 `MemAvailable` 判断）避免加载失败。
