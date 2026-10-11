@@ -40,6 +40,8 @@ def configure_logging() -> None:
         stream=sys.stderr,
     )
     logging.Formatter.converter = time.gmtime
+    # huggingface_hub 走 httpx，每个 HEAD/GET 都打一条 INFO，几十个文件就刷满启动日志。
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def parse_workers(raw: str) -> int:

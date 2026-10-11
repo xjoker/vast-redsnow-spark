@@ -18,6 +18,13 @@ def write_model(dest: Path, *, shard: bool) -> None:
         (dest / "model-00001-of-00015.safetensors").write_text("x", encoding="utf-8")
 
 
+def test_http_request_lines_hidden():
+    download_model.configure_logging()
+    import logging
+    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
+    assert download_model.LOG.isEnabledFor(logging.INFO)
+
+
 def test_workers():
     assert download_model.parse_workers("8") == 8
     assert download_model.parse_workers("16") == 16
@@ -118,6 +125,7 @@ def test_orphan_incomplete_removed(tmp: Path):
 if __name__ == "__main__":
     import tempfile
 
+    test_http_request_lines_hidden()
     test_workers()
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
