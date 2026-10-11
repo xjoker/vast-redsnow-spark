@@ -35,6 +35,7 @@
 - 解码：写代码 33–34 tok/s（MTP 接受率 0.86–0.89），接近 25 万 token 时 19–26 tok/s。
 - 并发槽默认 1（`MAX_ACTIVE_REQUESTS` 可调）。总吞吐 24–31 tok/s 不随槽数变；4 槽时单请求降到 9–10 tok/s。262K 缓存配 2 槽时 2×60K 起 CUDA OOM，配 4 槽时 4×32K 就 OOM；4 槽配 `CACHE_SIZE=131072`：4×60K 因页池错开预填而通过，4×32K 两次一过一挂（边缘）；短请求配 `NUM_DRAFT_TOKENS=1` 单请求 13–15 tok/s、总吞吐约 30 tok/s。OOM 只让当次请求 503，worker 不再整体失效（`server.patch` 改了 worker.py）。完整表格见 README。
 - `NUM_DRAFT_TOKENS=3` 快约 5% 但接受率降到 0.73–0.80，维持 2；预填 `chunk_size` 8192 会 `Generator drained`，维持 4096。
+- DFlash2 草稿器（`incoai/GLM-5.3-Flash-DFlash2`，`-dm` 替换 `--mtp`）评估过，不集成。同机同提示（代码、中文、JSON、推理各跑贪心和默认采样，600 token）加权解码：MTP 草稿 2 为 31.8 tok/s（接受率 0.78）；DFlash2 草稿 3/5/7/7 动态分别为 30.9/33.7/30.0/30.4 tok/s（接受率 0.69/0.58/0.46/0.56）。最好只快 6%，与 MTP 草稿 3 相当；加载后多占约 1.5–2 GiB，多下 2.2 GB，许可证 cc-by-nc-nd-4.0。草稿器按原版 GLM-5.3-Flash 训练，在 RED-SNOW 上草稿越长接受率掉得越快，只有短 JSON 输出能到 45–58 tok/s。
 
 **内存（视觉，`MAX_IMAGE_TOKENS` 8000）**
 
