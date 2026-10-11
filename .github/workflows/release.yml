@@ -1,0 +1,68 @@
+name: 发布镜像
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: 核对当天版本
+        id: version
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          today=$(date -u +%Y%m%d)
+          if ! [[ "$version" =~ ^${today}\.[1-9][0-9]*$ ]]; then
+            echo "VERSION=${version} 不是今天 UTC ${today} 的 YYYYMMDD.N。当天第一发是 .1，同日再发才递增。"
+            exit 1
+          fi
+          echo "value=${version}" >> "$GITHUB_OUTPUT"
+      - name: 需要 NGC_API_KEY
+        env:
+          NGC_API_KEY: ${{ secrets.NGC_API_KEY }}
+        run: |
+          if [ -z "${NGC_API_KEY}" ]; then
+            echo "仓库密钥 NGC_API_KEY 为空。到 NVIDIA NGC 建 key，存进 GitHub Actions secrets。"
+            exit 1
+          fi
+      - name: 登录 GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 登录 NGC
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: nvcr.io
+          username: $oauthtoken
+          password: ${{ secrets.NGC_API_KEY }}
+      - name: Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: 构建并推送
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          push: true
+          no-cache: true
+          platforms: linux/arm64
+          provenance: false
+          sbom: false
+          tags: ghcr.io/${{ github.repository_owner }}/redsnow-exl3:${{ steps.version.outputs.value }}
+          build-args: IMAGE_VERSION=${{ steps.version.outputs.value }}
+      - name: 打标签
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          if git rev-parse "v${version}" >/dev/null 2>&1; then
+            echo "标签 v${version} 已存在"
+            exit 1
+          fi
+          git tag "v${version}"
+          git push origin "v${version}"

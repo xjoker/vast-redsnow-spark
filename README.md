@@ -28,13 +28,13 @@ SSH 主机密钥在容器第一次启动时生成，不写进镜像。
 ./build.sh
 ```
 
-产物是本地镜像 `redsnow-exl3:` 加 `VERSION` 里的版本号。脚本固定 `--platform linux/arm64`，默认不推送。推送到 GHCR 时自己指定仓库名：
+产物是本地镜像 `redsnow-exl3:` 加 `VERSION` 里的版本号。脚本固定 `--platform linux/arm64`，默认不推送。
 
-```bash
-IMAGE=ghcr.io/<owner>/redsnow-exl3:$(tr -d '[:space:]' < VERSION) ./build.sh --push
-```
+版本号是当天 UTC 的 `YYYYMMDD.N`。当天第一发是 `.1`，同一天再发才递增。推送镜像只用这个 tag，不用 `latest`。GPUtw 拒绝 `latest`。
 
-NGC 基础镜像 `nvcr.io/nvidia/pytorch:26.07-py3` 可能要先 `docker login nvcr.io`。tag 不能用 `latest`。GPUtw 拒绝 `latest`。
+推到 `main` 会跑测试，并在 `ubuntu-24.04-arm` 上构建镜像，不推送。发布要在 Actions 里手动运行「发布镜像」。它核对 `VERSION` 的日期是今天，再用 `--no-cache` 推到 `ghcr.io/<owner>/redsnow-exl3:<VERSION>`，并打上 `v<VERSION>`。仓库密钥要有 `NGC_API_KEY`，值是 NVIDIA NGC 的 API key。
+
+NGC 基础镜像 `nvcr.io/nvidia/pytorch:26.07-py3` 在本地构建时可能要先 `docker login nvcr.io`。
 
 ## 部署
 
