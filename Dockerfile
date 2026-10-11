@@ -14,12 +14,16 @@ ENV TORCH_CUDA_ARCH_LIST=12.1 \
     HF_ENDPOINT=https://huggingface.co \
     PYTHONUNBUFFERED=1
 
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl openssh-server sudo \
+COPY normalize_apt_sources.py /tmp/normalize_apt_sources.py
+RUN python3 /tmp/normalize_apt_sources.py /etc/apt/sources.list /etc/apt/sources.list.d \
+ && rm -f /tmp/normalize_apt_sources.py \
+ && rm -f /etc/pip.conf /etc/xdg/pip/pip.conf /root/.pip/pip.conf /root/.config/pip/pip.conf \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl openssh-server iproute2 sudo \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd \
  && sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config \
- && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+ && sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config \
  && useradd --create-home --shell /bin/bash --user-group tunnel \
  && printf 'tunnel ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/tunnel \
  && chmod 440 /etc/sudoers.d/tunnel
@@ -62,9 +66,7 @@ RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spar
 
 COPY auth_proxy.py download_model.py /opt/redsnow/
 COPY entrypoint.sh /opt/redsnow/entrypoint.sh
-COPY normalize_apt_sources.py /usr/local/bin/normalize_apt_sources.py
-RUN chmod 755 /opt/redsnow/entrypoint.sh /opt/redsnow/auth_proxy.py /opt/redsnow/download_model.py /usr/local/bin/normalize_apt_sources.py \
- && python3 /usr/local/bin/normalize_apt_sources.py
+RUN chmod 755 /opt/redsnow/entrypoint.sh /opt/redsnow/auth_proxy.py /opt/redsnow/download_model.py
 
 ARG IMAGE_VERSION=20261011.1
 ENV IMAGE_VERSION=${IMAGE_VERSION}
