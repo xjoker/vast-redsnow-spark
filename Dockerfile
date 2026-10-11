@@ -108,7 +108,7 @@ COPY auth_proxy.py download_model.py /opt/redsnow/
 COPY entrypoint.sh /opt/redsnow/entrypoint.sh
 RUN chmod 755 /opt/redsnow/entrypoint.sh /opt/redsnow/auth_proxy.py /opt/redsnow/download_model.py
 
-ARG IMAGE_VERSION=20261011.7
+ARG IMAGE_VERSION=20261011.8
 ENV IMAGE_VERSION=${IMAGE_VERSION}
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=${GIT_COMMIT}
