@@ -843,9 +843,9 @@ main() {
     log "MAX_ACTIVE_REQUESTS 必须是正整数，当前是 ${MAX_ACTIVE_REQUESTS}"
     exit 1
   fi
-  # 实测：缓存池大于 131072 时多个长提示会同时预填，2×60K 起就 CUDA OOM；131072 时池子自己把预填错开。
+  # 实测：缓存池大于 131072 时多个长提示会同时预填，2×60K 起就 CUDA OOM；131072 时池子把大部分预填错开。
   if (( MAX_ACTIVE_REQUESTS > 1 )) && [[ "$CACHE_SIZE" =~ ^[0-9]+$ ]] && (( CACHE_SIZE > 131072 )); then
-    log "warn: MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} 配 CACHE_SIZE=${CACHE_SIZE} 未通过长提示测试，多个长请求同时预填会 OOM（单个请求返回 503）。多槽建议 CACHE_SIZE=131072。"
+    log "warn: MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} 配 CACHE_SIZE=${CACHE_SIZE} 未通过长提示测试，多个长请求同时预填会 OOM（单个请求返回 503）。多槽建议 CACHE_SIZE=131072 NUM_DRAFT_TOKENS=1。"
   fi
   case "$EASYTIER_PRIVATE_MODE" in
     0 | 1) ;;

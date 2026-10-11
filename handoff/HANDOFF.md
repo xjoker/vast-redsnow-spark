@@ -33,7 +33,7 @@
 
 - 预填约 660 tok/s 是 GPU 跑满（96%）时的速度；前缀缓存有效，同一份 9.4 万 token 文档第二次起首 token 0.8 s。
 - 解码：写代码 33–34 tok/s（MTP 接受率 0.86–0.89），接近 25 万 token 时 19–26 tok/s。
-- 并发槽默认 1（`MAX_ACTIVE_REQUESTS` 可调）。总吞吐 24–31 tok/s 不随槽数变；4 槽时单请求降到 9–10 tok/s。262K 缓存配 2 槽时 2×60K 起 CUDA OOM，配 4 槽时 4×32K 就 OOM；4 槽配 `CACHE_SIZE=131072` 测到 4×60K 都通过（页池错开预填，MemAvailable 最低 2.1 GiB）。OOM 只让当次请求 503，worker 不再整体失效（`server.patch` 改了 worker.py）。完整表格见 README。
+- 并发槽默认 1（`MAX_ACTIVE_REQUESTS` 可调）。总吞吐 24–31 tok/s 不随槽数变；4 槽时单请求降到 9–10 tok/s。262K 缓存配 2 槽时 2×60K 起 CUDA OOM，配 4 槽时 4×32K 就 OOM；4 槽配 `CACHE_SIZE=131072`：4×60K 因页池错开预填而通过，4×32K 两次一过一挂（边缘）；短请求配 `NUM_DRAFT_TOKENS=1` 单请求 13–15 tok/s、总吞吐约 30 tok/s。OOM 只让当次请求 503，worker 不再整体失效（`server.patch` 改了 worker.py）。完整表格见 README。
 - `NUM_DRAFT_TOKENS=3` 快约 5% 但接受率降到 0.73–0.80，维持 2；预填 `chunk_size` 8192 会 `Generator drained`，维持 4096。
 
 **内存（视觉，`MAX_IMAGE_TOKENS` 8000）**
