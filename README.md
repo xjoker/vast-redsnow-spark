@@ -135,7 +135,7 @@ curl -N <BASE_URL>/chat/completions \
 | `SSH_TUNNELS` | 空，等于 `127.0.0.1:$PROXY_PORT` | 隧道用户允许转发的目标，逗号分隔，最多 16 个 |
 | `EASYTIER_NETWORK_NAME` | 空 | EasyTier 网络名；与 `EASYTIER_NETWORK_SECRET` 都填才启动，都空则不启动，只填一个则启动时 warn 并不启动 |
 | `EASYTIER_NETWORK_SECRET` | 空 | EasyTier 网络密钥，不进日志，不写入 `/etc/environment` |
-| `EASYTIER_PEERS` | 空 | 逗号分隔，`tcp://host:port` 或 `udp://host:port`，格式不对启动即退出。空则只监听 tcp/udp 11010 等别人来连。peer 要填公网可达地址，填 `127.0.0.1` 无效 |
+| `EASYTIER_PEERS` | 空 | 逗号分隔，`tcp://host:port` 或 `udp://host:port`，格式不对启动即退出。空则只监听 tcp/udp 11010 等别人来连。peer 要填公网可达地址，填 `127.0.0.1` 无效。可以多填几条互为备用，连不上的那条不打重试日志，入网、换 IP、掉线由入口日志报告。同一出口后的两台 Vast 机器互连要填内网地址加外部映射端口，公网地址回环不通 |
 | `EASYTIER_IPV4` | 空 | 固定虚拟网地址（如 `10.144.144.2/24`）；空则 DHCP |
 | `EASYTIER_HOSTNAME` | `redsnow` | EasyTier 节点名 |
 | `EASYTIER_PRIVATE_MODE` | `1` | `1` 私有模式，密钥不同的节点连入会被拒绝；`0` 关闭。只接受 0/1 |
