@@ -161,6 +161,7 @@ run_easytier 0 "$et_dir/full.env" EASYTIER_NETWORK_NAME=net EASYTIER_NETWORK_SEC
 has_line "$et_dir/full.env" 'ET_NETWORK_NAME=net' || fail "network name mapped"
 has_line "$et_dir/full.env" 'ET_NETWORK_SECRET=UNIQUESECRET' || fail "network secret mapped"
 has_line "$et_dir/full.env" 'ET_HOSTNAME=redsnow' || fail "default hostname"
+has_line "$et_dir/full.env" 'ET_CONSOLE_LOG_LEVEL=warn' || fail "console log level"
 has_line "$et_dir/full.env" 'ET_PRIVATE_MODE=true' || fail "default private mode"
 has_line "$et_dir/full.env" 'ET_DHCP=true' || fail "dhcp without ipv4"
 has_line "$et_dir/full.env" 'ET_NO_TUN=true' || fail "no tun"
@@ -185,13 +186,47 @@ has_line "$et_dir/private0.env" 'ET_PRIVATE_MODE=false' || fail "private mode 0 
 vip="$(PATH="$et_dir:$PATH" easytier_vip)" || fail "easytier_vip failed"
 [[ "$vip" == "10.144.144.7" ]] || fail "vip mask stripped: $vip"
 
-rm -f "$et_dir/ip"
-PATH="$et_dir:$PATH" PROXY_PORT=8898 EASYTIER_IP_FILE="$et_dir/ip" \
-  watch_easytier_vip 2>"$et_dir/watch.err"
-[[ "$(cat "$et_dir/ip")" == "10.144.144.7" ]] || fail "vip file"
-grep -q 'EasyTier 已入网' "$et_dir/watch.err" || fail "vip banner title"
-grep -q 'http://10.144.144.7:8898/v1' "$et_dir/watch.err" || fail "vip banner access"
+# 常驻 watch 后台运行：状态文件决定桩 easytier-cli 输出的虚拟 IP，逐步切换并断言日志和 IP 文件跟着变。
+watch_dir=$(mktemp -d)
+cat >"$watch_dir/easytier-cli" <<EOF
+#!/bin/bash
+printf '{"ipv4_addr": "%s"}\n' "\$(cat "$watch_dir/state")"
+EOF
+chmod +x "$watch_dir/easytier-cli"
+: >"$watch_dir/state"
+watch_log="$watch_dir/watch.log"
+PATH="$watch_dir:$PATH" EASYTIER_WATCH_INTERVAL=0.1 PROXY_PORT=8898 \
+  EASYTIER_IP_FILE="$watch_dir/ip" watch_easytier_vip 2>"$watch_log" &
+watch_pid=$!
+# 轮询等日志出现某行，约 10 秒超时；超时先杀后台进程再失败，避免测试挂住。
+wait_log() {
+  local i
+  for i in $(seq 1 100); do
+    grep -q -- "$1" "$watch_log" && return 0
+    sleep 0.1
+  done
+  kill "$watch_pid" 2>/dev/null || true
+  fail "watch: no '$1'"
+}
+printf '10.144.144.7/24' >"$watch_dir/state"
+wait_log '虚拟 IP  10.144.144.7'
+[[ "$(cat "$watch_dir/ip")" == "10.144.144.7" ]] || fail "vip file 7"
+grep -q 'http://10.144.144.7:8898/v1' "$watch_log" || fail "vip banner access"
+printf '10.144.144.8/24' >"$watch_dir/state"
+wait_log '虚拟 IP  10.144.144.8'
+[[ "$(cat "$watch_dir/ip")" == "10.144.144.8" ]] || fail "vip file 8"
+: >"$watch_dir/state"
+wait_log '虚拟 IP 丢失'
+[[ ! -e "$watch_dir/ip" ]] || fail "vip file kept after loss"
+kill "$watch_pid" 2>/dev/null || true
+wait "$watch_pid" 2>/dev/null || true
+[[ "$(grep -c '已入网' "$watch_log")" == 2 ]] || fail "two banners"
+# 启动日志配了 peer 时要列出来。nohup 桩掉，只看日志；watch 也桩掉，避免后台循环。
+start_out="$(env -i PATH=/usr/bin:/bin EASYTIER_PEERS='tcp://a:11010,udp://b:11010' "$BASH" -c \
+  'source ./entrypoint.sh; nohup() { :; }; watch_easytier_vip() { :; }; start_easytier' 2>&1)" || fail "start_easytier"
+grep -q 'peer: tcp://a:11010,udp://b:11010' <<<"$start_out" || fail "start log lists peers"
 
+printf '10.144.144.7\n' >"$et_dir/ip"
 conn_out="$(EASYTIER_IP_FILE="$et_dir/ip" PROXY_PORT=8898 CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 \
   TUNNEL_URL_FILE="$et_dir/no-url" connect_lines)"
 grep -q 'EasyTier  http://10.144.144.7:8898/v1' <<<"$conn_out" || fail "connect lines easytier"

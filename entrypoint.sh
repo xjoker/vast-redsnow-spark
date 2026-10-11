@@ -489,6 +489,8 @@ prepare_easytier() {
   fi
   export ET_NETWORK_NAME="$name" ET_NETWORK_SECRET="$secret"
   export ET_HOSTNAME="${EASYTIER_HOSTNAME:-redsnow}"
+  # peer 连不上时 easytier-core 每几秒打一组 INFO 重试日志，刷屏且没有可操作的信息，固定只留 warn。
+  export ET_CONSOLE_LOG_LEVEL=warn
   if [[ "${EASYTIER_PRIVATE_MODE:-1}" == 1 ]]; then
     export ET_PRIVATE_MODE=true
   else
@@ -567,26 +569,41 @@ start_cloudflared() {
 
 start_easytier() {
   nohup easytier-core >/proc/1/fd/2 2>&1 &
-  log "EasyTier 启动 pid=$!。EASYTIER_PEERS 留空时只等别人来连。"
+  local pid=$!
+  if [[ -n "${EASYTIER_PEERS:-}" ]]; then
+    log "EasyTier 启动 pid=${pid}，peer: ${EASYTIER_PEERS}"
+  else
+    log "EasyTier 启动 pid=${pid}。EASYTIER_PEERS 留空时只等别人来连。"
+  fi
   watch_easytier_vip &
 }
 
-# DHCP 分到虚拟 IP 要几秒，轮询最多 60 秒。地址写文件，供就绪横幅和指标行读取。
+# 常驻轮询：DHCP 要等同网节点连上才分配，晚入网、换 IP、掉线都要跟上，所以不能只等一次。
+# 只在 IP 变化时写文件、打横幅，避免每轮刷日志。EASYTIER_WATCH_INTERVAL 只为测试能调快。
 watch_easytier_vip() {
-  local ip="" file="${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}" _
-  for _ in $(seq 1 60); do
+  local ip="" last="" file="${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}"
+  local interval="${EASYTIER_WATCH_INTERVAL:-5}" began=$SECONDS seen=0 warned=0
+  while :; do
     ip="$(easytier_vip || true)"
-    if [[ -n "$ip" ]]; then
+    if [[ -n "$ip" && "$ip" != "$last" ]]; then
       mkdir -p "$(dirname "$file")"
       printf '%s\n' "$ip" >"$file"
+      seen=1
       log_banner "EasyTier 已入网" \
         "虚拟 IP  ${ip}" \
         "接入    http://${ip}:${PROXY_PORT}/v1（同网节点访问，带 Bearer）"
-      return 0
+      last="$ip"
+    elif [[ -z "$ip" && -n "$last" ]]; then
+      rm -f "$file"
+      log "warn: EasyTier 虚拟 IP 丢失，等待重新入网"
+      last=""
     fi
-    sleep 1
+    if [[ "$seen" == 0 && "$warned" == 0 ]] && (( SECONDS - began >= 60 )); then
+      warned=1
+      log "warn: 60 秒内没有拿到 EasyTier 虚拟 IP。DHCP 要先连上至少一个同网节点才会分配；检查 EASYTIER_PEERS 和网络密钥。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
+    fi
+    sleep "$interval"
   done
-  log "warn: 60 秒内没有拿到 EasyTier 虚拟 IP。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
 }
 
 # 标题用等号框起来，方便在长日志里找到公网地址和就绪信息。

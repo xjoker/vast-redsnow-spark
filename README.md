@@ -139,7 +139,7 @@ curl -N <BASE_URL>/chat/completions \
 | `EASYTIER_HOSTNAME` | `redsnow` | EasyTier 节点名 |
 | `EASYTIER_PRIVATE_MODE` | `1` | `1` 私有模式，密钥不同的节点连入会被拒绝；`0` 关闭。只接受 0/1 |
 
-入口把以上 `EASYTIER_*` 映射成 `easytier-core` 自己读取的 `ET_*`，用户侧不再使用 `ET_*`。容器没有 `/dev/net/tun` 和 `CAP_NET_ADMIN`，所以只能 no-tun：节点拿到虚拟 IP 后，其它节点才能经虚拟 IP 访问 `PROXY_PORT`；没有虚拟 IP 的节点只转发、不可达。入口在启动后最多 60 秒内读取虚拟 IP，写入 `/run/redsnow/easytier_ip`，打印 `EasyTier 已入网` 横幅，并在就绪横幅和指标行里显示。
+入口把以上 `EASYTIER_*` 映射成 `easytier-core` 自己读取的 `ET_*`，用户侧不再使用 `ET_*`。容器没有 `/dev/net/tun` 和 `CAP_NET_ADMIN`，所以只能 no-tun：节点拿到虚拟 IP 后，其它节点才能经虚拟 IP 访问 `PROXY_PORT`；没有虚拟 IP 的节点只转发、不可达。入口常驻每 5 秒读取一次虚拟 IP，写入 `/run/redsnow/easytier_ip`，并在就绪横幅和指标行里显示。DHCP 需要先连上至少一个活的同网节点才分配虚拟 IP；入网后日志打印 `EasyTier 已入网` 横幅，晚入网也会补打。peer 连接失败日志默认不输出。
 
 镜像内固定、可用环境变量覆盖的两项：`EXL3_UMA=1`（exllamav3 按 `MemAvailable` 判断内存余量，页缓存可回收，新下载完权重后可直接加载；设 `0` 回到 CUDA 空闲显存检查，空闲比切分少 2 GiB 以上会加载失败）和 `TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas`。启动后运行参数写入容器内 `/etc/environment`（权限 600）。入口不接受启动参数。
 
