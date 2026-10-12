@@ -33,7 +33,7 @@ Use one token per running machine: two connectors on one token load-balance requ
 
 ## Choose an offer
 
-Search GB10 (DGX Spark) offers. Known good: machine 151363. Known bad: 150922 (stuck at `docker_build() error writing dockerfile`). A bad host cannot be told from the listing: destroy the instance if it is not running within 3 minutes (Loading is not billed).
+Search GB10 (DGX Spark) offers. Some hosts get stuck at `docker_build() error writing dockerfile`; they cannot be told apart in the listing: destroy the instance if it is not running within 3 minutes (Loading is not billed).
 
 ## Create
 

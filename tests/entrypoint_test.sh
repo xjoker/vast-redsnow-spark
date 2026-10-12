@@ -17,7 +17,7 @@ fail() {
 [[ "$(choose_gpu_split "" 112)" == "112" ]] || fail "112 stays 112"
 [[ "$(choose_gpu_split "" 101)" == "112" ]] || fail "101 stays 112"
 [[ "$(choose_gpu_split 110 114)" == "110" ]] || fail "explicit"
-# MemTotal (kB): 151363 old kernel 127535260, 146927 new kernel 125442396.
+# MemTotal (kB) of two GB10 hosts: kernel 6.17.0-1022 127535260, kernel 6.17.0-1026 125442396.
 [[ -z "$(choose_uma_reserve "" 127535260)" ]] || fail "big machine keeps fork default"
 [[ "$(choose_uma_reserve "" 125442396)" == "6144" ]] || fail "small machine reserve 6144"
 [[ "$(choose_uma_reserve 4096 125442396)" == "4096" ]] || fail "explicit reserve wins"
