@@ -295,7 +295,7 @@ index 4945f6d..8ea904d 100755
      print(f"Native API listening {args.host}:{args.port}; max_active={args.max_active_requests}", flush=True)
      try:
 diff --git a/server/worker.py b/server/worker.py
-index 56fcb9b..e0bc5cd 100644
+index 56fcb9b..0321d08 100644
 --- a/server/worker.py
 +++ b/server/worker.py
 @@ -5,7 +5,7 @@ import contextlib
@@ -470,19 +470,20 @@ index 56fcb9b..e0bc5cd 100644
                          # Avoid retaining GPU tensors, logits, or Job references
                          # in slow HTTP queues.
                          safe = {k: event[k] for k in (
-@@ -138,6 +252,25 @@ class GenerationWorker:
+@@ -138,6 +252,31 @@ class GenerationWorker:
              for ticket in outstanding:
                  self._error(ticket, APIError(self.failed or "Server is closing", 503, "engine_unavailable"))
  
 +    def _count_event(self, event, ticket):
-+        progress = self.progress
++        # progress[id] = [last curr_progress, prefill tokens counted so far]
++        state = self.progress.setdefault(ticket.identifier, [None, 0])
 +        stage = event.get("stage")
 +        if stage == "prefill":
 +            now = event.get("curr_progress", 0)
-+            last = progress.get(ticket.identifier)
-+            progress[ticket.identifier] = now
++            last, state[0] = state[0], now
 +            # The first event includes the prefix-cache hit and is used only as a baseline; otherwise cache hits would be counted as prefill speed.
 +            if last is not None and now > last:
++                state[1] += now - last
 +                with self.stats_lock:
 +                    self.counters["prefill_tokens"] += now - last
 +        elif stage == "streaming":
@@ -492,6 +493,11 @@ index 56fcb9b..e0bc5cd 100644
 +                    self.counters["generation_tokens"] += ids.shape[-1]
 +        if event.get("eos"):
 +            self.record_draft(event.get("accepted_draft_tokens", 0), event.get("rejected_draft_tokens", 0))
++            # The baseline chunk is not seen live (a short prompt is a single chunk), so settle up from the final totals.
++            missing = event.get("prompt_tokens", 0) - event.get("cached_tokens", 0) - state[1]
++            if missing > 0:
++                with self.stats_lock:
++                    self.counters["prefill_tokens"] += missing
 +
      def status(self):
          with self.lock:

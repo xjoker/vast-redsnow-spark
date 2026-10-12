@@ -55,6 +55,7 @@ opencode (`~/.config/opencode/opencode.json`, set `baseURL` to the banner's Base
 
 ## Monitoring
 
+- Logs: everything also goes to `vastai logs`; the persistent copy survives restarts: `tail -F /workspace/logs/redsnow.log` (3 GiB cap by default).
 - `/dashboard`: read-only page; open `<Base URL without /v1>/dashboard` and enter `API_TOKEN`. The page itself holds no data; it polls `/metrics` every 2 s with the Bearer token (kept in sessionStorage).
 - `/metrics`: Prometheus text format (prefix `redsnow_`), Bearer required. `redsnow_upstream_up` 0 means inference is down and only host metrics remain.
 
@@ -86,6 +87,8 @@ Only `API_TOKEN` is required. Everything else has a default; see `.env.example` 
 | `EXL3_UMA_RESERVE_MB` | auto | Memory kept for the system; 6144 is chosen automatically on ~119.6 GiB hosts (fork default 8192). Do not go below 6144 |
 | `CF_TUNNEL` | `1` | `0` disables the tunnel; `CF_TUNNEL_TOKEN` switches to a named tunnel |
 | `METRICS_INTERVAL` | `60` | Seconds between one-line metrics in the log, `0` disables |
+| `LOG_DIR` | `/workspace/logs` | Directory for the persistent copy of the container log (`redsnow.log`, rotated) |
+| `LOG_MAX_MB` | `3072` | Total size cap of the persistent log across rotated files, `0` disables it |
 | `SSH_PASSWORD` / `SSH_USER_PUBLIC_KEY` / `SSH_TUNNELS` | empty | Tunnel user (`SSH_USER`, default `tunnel`) and allowed forward targets. root accepts public keys only, and on Vast only account-level SSH Keys |
 | `EASYTIER_NETWORK_NAME` / `_SECRET` / `_PEERS` | empty | EasyTier starts only when name and secret are both set; no-tun mode, peers reach `PROXY_PORT` via the virtual IP |
 

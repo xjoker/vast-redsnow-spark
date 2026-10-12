@@ -104,11 +104,11 @@ RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spar
  && cp /tmp/redsnow/LICENSE /usr/share/licenses/redsnow-server/LICENSE \
  && rm -rf /tmp/redsnow
 
-COPY auth_proxy.py dashboard.html download_model.py /opt/redsnow/
+COPY auth_proxy.py dashboard.html download_model.py log_sink.py /opt/redsnow/
 COPY entrypoint.sh /opt/redsnow/entrypoint.sh
-RUN chmod 755 /opt/redsnow/entrypoint.sh /opt/redsnow/auth_proxy.py /opt/redsnow/download_model.py
+RUN chmod 755 /opt/redsnow/entrypoint.sh /opt/redsnow/auth_proxy.py /opt/redsnow/download_model.py /opt/redsnow/log_sink.py
 
-ARG IMAGE_VERSION=20261012.1
+ARG IMAGE_VERSION=20261012.2
 ENV IMAGE_VERSION=${IMAGE_VERSION}
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=${GIT_COMMIT}

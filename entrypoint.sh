@@ -8,6 +8,9 @@ log() {
 }
 
 DOWNLOAD_MODEL_PY="${DOWNLOAD_MODEL_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/download_model.py}"
+LOG_SINK_PY="${LOG_SINK_PY:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/log_sink.py}"
+# format_serve_output touches this when inference is ready; the page-cache dropper waits for it.
+SERVE_READY_FILE="${SERVE_READY_FILE:-/run/redsnow/serve_ready}"
 MODEL_REPO_DEFAULT="vcruz305/RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw"
 MODEL_REVISION_DEFAULT="071adefe6c1c8de379d76977985811b7d4385454"
 SERVED_MODEL_NAME="RED-SNOW-5.3-FLASH-EXL3-2.49"
@@ -458,10 +461,10 @@ start_load_cache_dropper() {
 }
 
 stop_load_cache_dropper() {
-  local dropper="$1" serve_pid="$2" serve_log="$3" _
+  local dropper="$1" serve_pid="$2" _
   [[ -n "$dropper" ]] || return 0
   for _ in $(seq 1 180); do
-    if grep -q "Native API listening" "$serve_log" 2>/dev/null; then
+    if [[ -e "$SERVE_READY_FILE" ]]; then
       break
     fi
     if ! kill -0 "$serve_pid" 2>/dev/null; then
@@ -723,7 +726,24 @@ usage_summary() {
   }'
 }
 
-# The inference stdout/stderr comes in here via tail: usage lines are squashed into one line, load-time Mixed-K noise keeps only layer progress, and access info is printed when Native API is ready.
+# Send everything PID 1 and its children print through log_sink.py, which keeps a size-capped copy on disk.
+# Must run before anything else starts so /proc/1/fd/2 and inherited fds all go through the sink.
+setup_file_logging() {
+  local dir="${LOG_DIR:-/workspace/logs}" mb="${LOG_MAX_MB:-3072}"
+  if [[ ! "$mb" =~ ^[0-9]+$ ]]; then
+    log "LOG_MAX_MB must be a non-negative integer, got ${mb}"
+    exit 1
+  fi
+  ((mb > 0)) || return 0
+  if ! { mkdir -p "$dir" && [[ -w "$dir" ]]; } 2>/dev/null; then
+    log "warn: LOG_DIR ${dir} is not writable; logging to stdout only."
+    return 0
+  fi
+  exec > >(python3 -u "$LOG_SINK_PY" "$dir" "$mb") 2>&1
+  log "logging to ${dir}/redsnow.log, capped at ${mb} MiB in total"
+}
+
+# The inference stdout/stderr comes in here: usage lines are squashed into one line, load-time Mixed-K noise keeps only layer progress, and access info is printed when Native API is ready.
 format_serve_output() {
   local line summary start_at=$SECONDS
   local re_layer='^ -- Mixed-K experts in model\.language_model\.layers\.([0-9]+)\.'
@@ -743,6 +763,7 @@ format_serve_output() {
         ;;
       *"Native API listening"*)
         printf '%s\n' "$line" >&2
+        mkdir -p "$(dirname "$SERVE_READY_FILE")" && : >"$SERVE_READY_FILE"
         rows=("load time $((SECONDS - start_at)) s")
         while IFS= read -r row; do
           rows+=("$row")
@@ -804,6 +825,8 @@ start_metrics_loop() {
 }
 
 main() {
+  setup_file_logging
+  log "container start, image ${IMAGE_VERSION:-unknown}"
   if [[ $# -gt 0 ]]; then
     log "ignoring startup arguments. Set context and VRAM split with the environment variables CACHE_SIZE and GPU_SPLIT_GB."
   fi
@@ -912,7 +935,7 @@ main() {
   publish_runtime_env /etc/environment MODEL_DIR
   log "inference will use model dir ${MODEL_DIR}"
 
-  local free_gib gs warning serve_status=0 serve_log tail_pid
+  local free_gib gs warning serve_status=0
   free_gib="$(read_free_gib)"
   gs="$(choose_gpu_split "${GPU_SPLIT_GB:-}" "$free_gib")"
   warning="$(split_warning "$gs" "$CACHE_SIZE")"
@@ -935,7 +958,7 @@ main() {
   GPU_SPLIT_GB="$gs"
   publish_runtime_env /etc/environment GPU_SPLIT_GB
 
-  serve_log="$(mktemp)"
+  rm -f "$SERVE_READY_FILE"
   vision_serve_args
   log "starting inference, args aligned with upstream serve.sh: -m ${MODEL_DIR} -gs ${gs} --cache_size ${CACHE_SIZE} --cache_quant 4 --mtp --num_draft_tokens ${NUM_DRAFT_TOKENS} --max-model-len ${CACHE_SIZE} --max-active-requests ${MAX_ACTIVE_REQUESTS} -ambs ${MAX_ACTIVE_REQUESTS} --port ${SERVE_PORT} ${VISION_ARGS[*]}"
   python3 /opt/redsnow/server/serve_glm.py \
@@ -951,16 +974,16 @@ main() {
     --port "${SERVE_PORT}" \
     --served-model-name "${SERVED_MODEL_NAME}" \
     --request-timeout 7200 \
-    "${VISION_ARGS[@]}" >>"$serve_log" 2>&1 &
+    "${VISION_ARGS[@]}" > >(format_serve_output) 2>&1 &
   local serve_pid=$!
-  tail -n +0 -F "$serve_log" > >(format_serve_output) &
-  tail_pid=$!
   if [[ -n "${DROPPER_PID:-}" ]]; then
-    stop_load_cache_dropper "$DROPPER_PID" "$serve_pid" "$serve_log" &
+    stop_load_cache_dropper "$DROPPER_PID" "$serve_pid" &
   fi
   log "inference pid=${serve_pid} listening on 127.0.0.1:${SERVE_PORT} only. Public side is 0.0.0.0:${PROXY_PORT}. A cold upstream load takes about 4 to 6 minutes, about one minute when the weights are already in page cache. Calls work only after Native API listening appears."
   wait "${serve_pid}" || serve_status=$?
-  kill "$tail_pid" ${DROPPER_PID:+"$DROPPER_PID"} ${METRICS_PID:+"$METRICS_PID"} 2>/dev/null || true
+  # Give the output formatter a moment to drain the last lines before PID 1 exits.
+  sleep 1
+  kill ${DROPPER_PID:+"$DROPPER_PID"} ${METRICS_PID:+"$METRICS_PID"} 2>/dev/null || true
   log "inference process exited status=${serve_status}"
   exit "${serve_status}"
 }

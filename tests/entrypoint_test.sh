@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+log_test_dir="$(mktemp -d)"
+trap 'rm -rf "$log_test_dir"' EXIT
+# File logging is off by default in tests; the cases that need it set LOG_MAX_MB themselves.
+export LOG_MAX_MB=0 SERVE_READY_FILE="$log_test_dir/serve_ready"
 # shellcheck disable=SC1091
 source ./entrypoint.sh
 
@@ -591,5 +595,42 @@ rm -rf "$stub_dir"
   [[ "$rc" -eq 1 ]] || exit 1
   grep -q "METRICS_INTERVAL" /tmp/redsnow-metrics.err || exit 1
 ) || fail "metrics interval validation"
+
+(
+  API_TOKEN=tok LOG_MAX_MB=abc
+  rc=0
+  (main) >/dev/null 2>"$log_test_dir/lm.err" || rc=$?
+  [[ "$rc" -eq 1 ]] && grep -q "LOG_MAX_MB" "$log_test_dir/lm.err"
+) || fail "log max validation"
+
+# With file logging on, main output goes through the sink: stdout and the log file both get the lines.
+(
+  API_TOKEN=tok METRICS_INTERVAL=abc LOG_MAX_MB=5 LOG_DIR="$log_test_dir/logs" LOG_SINK_PY="$PWD/log_sink.py"
+  (main) >"$log_test_dir/sink.out" 2>&1 || true
+  for _ in $(seq 1 50); do
+    grep -q "METRICS_INTERVAL must" "$log_test_dir/logs/redsnow.log" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q "container start" "$log_test_dir/logs/redsnow.log" &&
+    grep -q "METRICS_INTERVAL must" "$log_test_dir/logs/redsnow.log" &&
+    grep -q "container start" "$log_test_dir/sink.out"
+) || fail "file logging through sink"
+
+# An unusable LOG_DIR only warns.
+(
+  : >"$log_test_dir/notdir"
+  API_TOKEN=tok METRICS_INTERVAL=abc LOG_MAX_MB=5 LOG_DIR="$log_test_dir/notdir/x"
+  (main) >/dev/null 2>"$log_test_dir/bad.err" || true
+  grep -q "LOG_DIR" "$log_test_dir/bad.err" && grep -q "METRICS_INTERVAL must" "$log_test_dir/bad.err"
+) || fail "unusable log dir falls back to stdout"
+
+# The ready marker appears when inference prints Native API listening.
+rm -f "$SERVE_READY_FILE"
+(API_TOKEN=tok CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 VISION=1 CF_TUNNEL=0 \
+  format_serve_output <<<'loading' >/dev/null 2>&1)
+[[ ! -e "$SERVE_READY_FILE" ]] || fail "no marker before ready"
+(API_TOKEN=tok CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 VISION=1 CF_TUNNEL=0 \
+  format_serve_output <<<'Native API listening 127.0.0.1:8899; max_active=1' >/dev/null 2>&1)
+[[ -e "$SERVE_READY_FILE" ]] || fail "marker after ready"
 
 echo "entrypoint ok"
