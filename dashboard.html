@@ -1,73 +1,162 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>推理监控</title>
+<title>RED-SNOW Spark</title>
 <style>
 :root {
-  --bg: #f6f7f9; --card: #ffffff; --text: #1c2430; --muted: #6b7686; --line: #e2e6ec;
-  --accent: #2563eb; --ok: #15803d; --bad: #b91c1c; --warn: #b45309;
+  --bg: #0d1117; --card: #161b24; --card2: #1c2330; --text: #e8ecf2; --muted: #8893a5; --line: #262e3b;
+  --track: #252d3a; --amber: #f0a62b; --violet: #8b6ef0; --blue: #3b82f6; --teal: #14b8a6;
+  --ok: #34d399; --okbg: rgba(52,211,153,.14); --warn: #fbbf24; --warnbg: rgba(251,191,36,.14);
+  --bad: #f87171; --badbg: rgba(248,113,113,.15); --shadow: 0 1px 2px rgba(0,0,0,.4);
 }
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: light) {
   :root {
-    --bg: #12161c; --card: #1b2129; --text: #e6e9ee; --muted: #8b95a5; --line: #2b333e;
-    --accent: #60a5fa; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24;
+    --bg: #dde2ea; --card: #ffffff; --card2: #f6f7fa; --text: #131a26; --muted: #66707f; --line: #e5e8ee;
+    --track: #e3e6ec; --amber: #e39a14; --violet: #7048e8; --blue: #2563eb; --teal: #0d9488;
+    --ok: #0f8a5f; --okbg: #d3efe3; --warn: #a36a00; --warnbg: #fbecc8;
+    --bad: #c4283a; --badbg: #fadadd; --shadow: 0 1px 2px rgba(20,30,50,.06);
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text);
-  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
-main { max-width: 1100px; margin: 0 auto; padding: 16px; }
-header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-h1 { font-size: 18px; margin: 0; }
-h2 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 20px 0 8px; }
-form { display: flex; gap: 8px; flex-wrap: wrap; }
-input { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); min-width: 0; width: 260px; max-width: 100%; }
-button { padding: 6px 12px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; }
-#status { color: var(--muted); font-size: 12px; }
-#status.err { color: var(--bad); }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
-.card .k { color: var(--muted); font-size: 12px; }
-.card .v { font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
-.card .s { color: var(--muted); font-size: 12px; }
-.ok { color: var(--ok); } .bad { color: var(--bad); }
-.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
-canvas { width: 100%; height: 110px; display: block; }
-@media (max-width: 480px) { .grid { grid-template-columns: 1fr 1fr; } input { width: 100%; } }
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 40px; }
+header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 18px; }
+h1 { font-size: 28px; line-height: 1.1; margin: 0 0 6px; letter-spacing: -.01em; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; color: var(--muted); font-size: 13px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: var(--track); color: var(--muted); white-space: nowrap; }
+.chip.ok { background: var(--okbg); color: var(--ok); } .chip.warn { background: var(--warnbg); color: var(--warn); }
+.chip.bad { background: var(--badbg); color: var(--bad); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+button { font: inherit; padding: 6px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); cursor: pointer; }
+button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+input { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card2); color: var(--text); min-width: 0; width: 280px; max-width: 100%; }
+.card { background: var(--card); border-radius: 14px; padding: 16px 18px; box-shadow: var(--shadow); min-width: 0; }
+#login { display: none; margin-bottom: 16px; }
+#login form { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+#login p { margin: 0; color: var(--muted); }
+#login .err { color: var(--bad); margin-top: 6px; }
+.grid { display: grid; gap: 14px; margin-bottom: 14px; }
+.tiles { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.panels { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.lbl { font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+.big { font-size: 32px; font-weight: 650; line-height: 1.15; margin-top: 6px; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.big small { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 5px; letter-spacing: 0; }
+.sub { color: var(--muted); font-size: 12px; margin-top: 4px; min-height: 18px; }
+canvas { display: block; width: 100%; height: 44px; margin-top: 8px; }
+canvas.tall { height: 64px; }
+.bar { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin: 6px 0 10px; }
+.bar i { display: block; height: 100%; width: 0; border-radius: 3px; background: var(--teal); transition: width .4s; }
+.row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.row span { color: var(--muted); } .row b { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.card h2 { font-size: 15px; margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.sec { font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); margin: 12px 0 2px; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; min-height: 22px; }
+.find { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--line); }
+.find:first-of-type { border-top: 0; }
+.find .chip { flex: none; text-transform: uppercase; font-size: 11px; }
+#updated { font-size: 12px; }
+@media (max-width: 480px) { h1 { font-size: 24px; } .big { font-size: 28px; } input { width: 100%; } }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>推理监控 <span id="ver" class="s"></span></h1>
-    <form id="login">
-      <input id="token" type="password" placeholder="API Token" autocomplete="off" aria-label="API Token">
-      <button type="submit">连接</button>
-    </form>
+    <div>
+      <h1>RED-SNOW Spark</h1>
+      <div class="meta">
+        <span class="chip" id="state"><span class="dot"></span><span id="state-t">Not connected</span></span>
+        <span class="chip" id="ver" hidden></span>
+        <span id="updated"></span>
+      </div>
+    </div>
+    <button id="signout" type="button" hidden>Change token</button>
   </header>
-  <div id="status">请输入 API Token</div>
 
-  <h2>推理</h2>
-  <div class="grid" id="g-infer"></div>
-  <h2>累计</h2>
-  <div class="grid" id="g-total"></div>
-  <h2>主机</h2>
-  <div class="grid" id="g-host"></div>
-  <h2>最近 15 分钟</h2>
-  <div class="charts" id="charts"></div>
+  <section class="card" id="login">
+    <p>Enter the API token to read <code>/metrics</code>. It is kept in this tab only (sessionStorage).</p>
+    <form id="form">
+      <input id="token" type="password" placeholder="API token" autocomplete="off" aria-label="API token">
+      <button class="primary" type="submit">Connect</button>
+    </form>
+    <div class="err" id="login-err" role="alert"></div>
+  </section>
+
+  <div class="grid tiles">
+    <div class="card"><div class="lbl">Decode</div><div class="big"><span id="t-dec">—</span><small>tok/s</small></div><canvas class="spark" data-h="dec" data-c="--amber"></canvas><div class="sub" id="s-dec"></div></div>
+    <div class="card"><div class="lbl">Prefill</div><div class="big"><span id="t-pre">—</span><small>tok/s</small></div><canvas class="spark" data-h="pre" data-c="--violet"></canvas><div class="sub">excludes prefix-cache hits</div></div>
+    <div class="card"><div class="lbl"><span>Requests</span><span id="t-slots"></span></div><div class="big"><span id="t-run">—</span><small>running</small></div><div class="sub" id="s-run"></div><div class="bar"><i id="b-run" style="background:var(--blue)"></i></div></div>
+    <div class="card"><div class="lbl"><span>Memory in use</span><span id="t-memp"></span></div><div class="big"><span id="t-mem">—</span><small>GiB</small></div><canvas class="spark" data-h="mem" data-c="--blue"></canvas><div class="sub" id="s-mem"></div></div>
+    <div class="card"><div class="lbl">GPU</div><div class="big"><span id="t-gpu">—</span><small>%</small></div><canvas class="spark" data-h="gpu" data-c="--teal"></canvas><div class="sub" id="s-gpu"></div></div>
+    <div class="card"><div class="lbl">Tokens served</div><div class="big"><span id="t-tok">—</span></div><div class="sub" id="s-tok"></div></div>
+  </div>
+
+  <div class="grid panels">
+    <section class="card">
+      <h2>LLM <span class="chip" id="llm-chip">—</span></h2>
+      <div class="sec">Decode, last 15 min</div><canvas class="spark tall" data-h="dec" data-c="--amber"></canvas>
+      <div class="sec">Prefill, last 15 min</div><canvas class="spark tall" data-h="pre" data-c="--violet"></canvas>
+      <div class="row"><span>Avg per-request decode</span><b id="l-per">—</b></div>
+      <div class="row"><span>MTP acceptance</span><b id="l-acc">—</b></div>
+      <div class="row"><span>Avg queue time</span><b id="l-q">—</b></div>
+      <div class="row"><span>Context size</span><b id="l-ctx">—</b></div>
+      <div class="row"><span>Prompt / completion tokens</span><b id="l-tok">—</b></div>
+      <div class="sec">Requests by finish reason</div><div class="tags" id="l-fin"></div>
+      <div class="sec">Errors by code</div><div class="tags" id="l-err"></div>
+    </section>
+
+    <section class="card">
+      <h2>GPU <span class="chip" id="gpu-chip">—</span></h2>
+      <div class="row" style="border:0"><span>Utilization</span><b id="g-util">—</b></div>
+      <div class="bar"><i id="b-util" style="background:var(--amber)"></i></div>
+      <div class="row" style="border:0"><span>Temperature</span><b id="g-temp">—</b></div>
+      <div class="bar"><i id="b-temp"></i></div>
+      <canvas class="spark tall" data-h="gpu" data-c="--teal"></canvas>
+      <div class="row"><span>Power</span><b id="g-pow">—</b></div>
+      <div class="row"><span>SM clock</span><b id="g-clk">—</b></div>
+    </section>
+
+    <section class="card">
+      <h2>Unified memory <span class="chip" id="mem-chip">—</span></h2>
+      <div class="row" style="border:0"><span>Available / total</span><b id="m-av">—</b></div>
+      <div class="bar"><i id="b-mem" style="background:var(--violet)"></i></div>
+      <canvas class="spark tall" data-h="mem" data-c="--blue"></canvas>
+      <div class="row"><span>Container (cgroup) current</span><b id="m-cg">—</b></div>
+      <div class="row"><span>OOM kills</span><b id="m-oom">—</b></div>
+    </section>
+
+    <section class="card">
+      <h2>System</h2>
+      <div class="row" style="border:0"><span>CPU</span><b id="y-cpu">—</b></div>
+      <div class="bar"><i id="b-cpu" style="background:var(--blue)"></i></div>
+      <div class="row"><span>Load (1 min)</span><b id="y-load">—</b></div>
+      <div class="row"><span>Disk free / total</span><b id="y-disk">—</b></div>
+      <div class="bar"><i id="b-disk" style="background:var(--teal)"></i></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Health findings <span class="chip" id="f-chip">—</span></h2>
+    <div id="finds"></div>
+  </section>
 </main>
 <script>
 "use strict";
-var KEY = "redsnow_token", WINDOW_MS = 15 * 60 * 1000, token = "", timer = null;
-var prev = null, hist = {dec: [], pre: [], gpu: [], mem: []};
+var KEY = "redsnow_token", WINDOW_MS = 15 * 60 * 1000, GIB = 1073741824;
+var token = "", timer = null, prev = null, samps = [], oomBase = null;
+var hist = {dec: [], pre: [], gpu: [], mem: []};
 
 function load() { try { return sessionStorage.getItem(KEY) || ""; } catch (e) { return ""; } }
 function save(v) { try { sessionStorage.setItem(KEY, v); } catch (e) {} }
-function clear() { try { sessionStorage.removeItem(KEY); } catch (e) {} }
+function clearTok() { try { sessionStorage.removeItem(KEY); } catch (e) {} }
+function $(id) { return document.getElementById(id); }
+function put(id, text) { $(id).textContent = text; }
 
-// 解析 Prometheus 文本：返回 {name: [{l: {label: value}, v: number}]}
+// Prometheus text -> {name: [{l: {label: value}, v: number}]}
 function parse(text) {
   var out = {};
   text.split("\n").forEach(function (line) {
@@ -89,182 +178,215 @@ function one(s, name, label, value) {
   return null;
 }
 function val(s, name, label, value) { var r = one(s, name, label, value); return r ? r.v : null; }
-function sum(s, name) { var a = s[name]; if (!a) return null; return a.reduce(function (t, r) { return t + r.v; }, 0); }
+function sum(s, name) { var a = s[name]; return a ? a.reduce(function (t, r) { return t + r.v; }, 0) : null; }
 
-// 两次采样求速率；缺任一端或计数器回退（重启）返回 null。
-function rate(cur, old, dt) {
-  if (cur === null || old === null || cur < old || dt <= 0) return null;
-  return (cur - old) / dt;
-}
-function ratio(num, den) { return num === null || den === null || den <= 0 ? null : num / den; }
-
-function fmt(v, d, unit) {
-  if (v === null || v === undefined || !isFinite(v)) return "—";
-  return v.toFixed(d) + (unit || "");
-}
-function bytes(v) {
+// Counter delta rate; a missing end or a decrease (restart) gives null.
+function rate(cur, old, dt) { return cur === null || old === null || cur < old || dt <= 0 ? null : (cur - old) / dt; }
+function ratio(n, d) { return n === null || d === null || d <= 0 ? null : n / d; }
+function fmt(v, d, unit) { return v === null || v === undefined || !isFinite(v) ? "—" : v.toFixed(d) + (unit || ""); }
+function gb(v) { return v === null ? "—" : (v / GIB).toFixed(1) + " GiB"; }
+function int(v) { return v === null ? "—" : Math.round(v).toLocaleString("en-US"); }
+function compact(v) {
   if (v === null) return "—";
-  var u = ["B", "KiB", "MiB", "GiB", "TiB"], i = 0;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return v.toFixed(i > 1 ? 1 : 0) + " " + u[i];
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + "B";
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "k";
+  return String(Math.round(v));
 }
-function int(v) { return v === null ? "—" : Math.round(v).toLocaleString(); }
+function width(id, pct) { $(id).style.width = pct === null ? "0" : Math.max(0, Math.min(100, pct)) + "%"; }
+function chip(id, text, cls) { var e = $(id); e.textContent = text; e.className = "chip" + (cls ? " " + cls : ""); }
 
 function sample(s, t) {
   var cpu = {}, total = 0;
   (s.redsnow_cpu_seconds_total || []).forEach(function (r) { cpu[r.l.mode] = r.v; total += r.v; });
   return {
-    t: t,
-    gen: val(s, "redsnow_generation_tokens_total"),
-    pre: val(s, "redsnow_prefill_tokens_total"),
-    acc: val(s, "redsnow_draft_tokens_total", "result", "accepted"),
-    rej: val(s, "redsnow_draft_tokens_total", "result", "rejected"),
-    comp: val(s, "redsnow_completion_tokens_total"),
-    decSec: val(s, "redsnow_decode_seconds_total"),
-    cpuTotal: s.redsnow_cpu_seconds_total ? total : null,
-    cpuIdle: s.redsnow_cpu_seconds_total ? (cpu.idle || 0) + (cpu.iowait || 0) : null
+    t: t, gen: val(s, "redsnow_generation_tokens_total"), pre: val(s, "redsnow_prefill_tokens_total"),
+    acc: val(s, "redsnow_draft_tokens_total", "result", "accepted"), rej: val(s, "redsnow_draft_tokens_total", "result", "rejected"),
+    comp: val(s, "redsnow_completion_tokens_total"), decSec: val(s, "redsnow_decode_seconds_total"),
+    qSec: val(s, "redsnow_queue_seconds_total"), reqs: sum(s, "redsnow_requests_total"), errs: sum(s, "redsnow_request_errors_total"),
+    cpuTotal: s.redsnow_cpu_seconds_total ? total : null, cpuIdle: s.redsnow_cpu_seconds_total ? (cpu.idle || 0) + (cpu.iowait || 0) : null
   };
 }
 
-function card(k, v, sub, cls) {
-  return '<div class="card"><div class="k">' + k + '</div><div class="v ' + (cls || "") + '">' + v +
-    '</div><div class="s">' + (sub || "&nbsp;") + '</div></div>';
+function tags(id, rows, labelKey, cls) {
+  var box = $(id);
+  box.textContent = "";
+  rows.forEach(function (r) {
+    var c = document.createElement("span");
+    c.className = "chip" + (cls && r.v > 0 ? " " + cls : "");
+    c.textContent = r.l[labelKey] + " " + int(r.v);
+    box.appendChild(c);
+  });
+  if (!rows.length) box.textContent = "—";
+}
+
+function findings(list) {
+  var box = $("finds");
+  box.textContent = "";
+  if (!list.length) list = [{sev: "ok", text: "All good: no issues detected."}];
+  var worst = list.some(function (f) { return f.sev === "bad"; }) ? "bad" : list.some(function (f) { return f.sev === "warn"; }) ? "warn" : "ok";
+  list.forEach(function (f) {
+    var row = document.createElement("div"), c = document.createElement("span"), t = document.createElement("span");
+    row.className = "find"; c.className = "chip " + f.sev;
+    c.textContent = f.sev === "bad" ? "critical" : f.sev === "warn" ? "warning" : "ok";
+    t.textContent = f.text;
+    row.appendChild(c); row.appendChild(t); box.appendChild(row);
+  });
+  chip("f-chip", worst === "ok" ? "Healthy" : worst === "warn" ? "Warnings" : "Critical", worst);
 }
 
 function render(s, now) {
-  var cur = sample(s, now), r = {};
+  var cur = sample(s, now), r = {}, old, list = [];
   if (prev && cur.t > prev.t) {
     var dt = (cur.t - prev.t) / 1000;
-    r.dec = rate(cur.gen, prev.gen, dt);
-    r.pre = rate(cur.pre, prev.pre, dt);
-    var da = rate(cur.acc, prev.acc, 1), dr = rate(cur.rej, prev.rej, 1);
-    r.accept = da !== null && dr !== null ? ratio(da, da + dr) : null;
-    var dc = rate(cur.comp, prev.comp, 1), ds = rate(cur.decSec, prev.decSec, 1);
-    r.perReq = dc !== null && ds !== null && ds > 0 ? dc / ds : null;
+    r.dec = rate(cur.gen, prev.gen, dt); r.pre = rate(cur.pre, prev.pre, dt);
     var dTot = rate(cur.cpuTotal, prev.cpuTotal, 1), dIdle = rate(cur.cpuIdle, prev.cpuIdle, 1);
     r.cpu = dTot !== null && dIdle !== null && dTot > 0 ? 100 * (1 - dIdle / dTot) : null;
   }
   prev = cur;
+  samps.push(cur);
+  while (samps.length > 1 && samps[0].t < now - WINDOW_MS) samps.shift();
+  old = samps[0];
+  // Window averages: oldest vs newest sample inside the 15-minute window.
+  var w = {};
+  if (old !== cur) {
+    var da = rate(cur.acc, old.acc, 1), dr = rate(cur.rej, old.rej, 1);
+    w.accept = da !== null && dr !== null ? ratio(da, da + dr) : null;
+    var dc = rate(cur.comp, old.comp, 1), ds = rate(cur.decSec, old.decSec, 1);
+    w.perReq = dc !== null && ds !== null && ds > 0 ? dc / ds : null;
+    var dq = rate(cur.qSec, old.qSec, 1), dn = rate(cur.reqs, old.reqs, 1);
+    w.queue = dq !== null && dn !== null && dn > 0 ? dq / dn : null;
+  }
 
   var memAvail = val(s, "redsnow_memory_available_bytes"), memTotal = val(s, "redsnow_memory_total_bytes");
-  var gpu = val(s, "redsnow_gpu_utilization_percent");
-  var up = val(s, "redsnow_upstream_up"), healthy = val(s, "redsnow_inference_healthy");
-  var running = val(s, "redsnow_requests_running"), waiting = val(s, "redsnow_requests_waiting");
-  var maxA = val(s, "redsnow_max_active_requests");
-  var reqs = sum(s, "redsnow_requests_total"), errs = sum(s, "redsnow_request_errors_total");
-  var diskFree = val(s, "redsnow_disk_free_bytes"), diskTotal = val(s, "redsnow_disk_total_bytes");
+  var memUsed = memAvail !== null && memTotal !== null ? memTotal - memAvail : null, memPct = ratio(memUsed, memTotal);
+  var gpu = val(s, "redsnow_gpu_utilization_percent"), temp = val(s, "redsnow_gpu_temperature_celsius");
   var power = val(s, "redsnow_gpu_power_watts"), clock = val(s, "redsnow_gpu_sm_clock_hertz");
-  var temp = val(s, "redsnow_gpu_temperature_celsius");
-  var online = up === 1 && healthy === 1;
+  var up = val(s, "redsnow_upstream_up"), healthy = val(s, "redsnow_inference_healthy");
+  var running = val(s, "redsnow_requests_running"), waiting = val(s, "redsnow_requests_waiting"), maxA = val(s, "redsnow_max_active_requests");
+  var diskFree = val(s, "redsnow_disk_free_bytes"), diskTotal = val(s, "redsnow_disk_total_bytes");
+  var oom = val(s, "redsnow_cgroup_oom_kills_total"), ptok = val(s, "redsnow_prompt_tokens_total"), ctok = val(s, "redsnow_completion_tokens_total");
+  var online = up === 1 && healthy === 1, bi = one(s, "redsnow_build_info");
 
-  var bi = one(s, "redsnow_build_info");
-  document.getElementById("ver").textContent = bi ? "镜像 " + bi.l.version : "";
+  chip("state", up === null ? "Unknown" : online ? "Online" : up === 1 ? "Unhealthy" : "Offline", up === null ? "" : online ? "ok" : "bad");
+  var ver = $("ver");
+  ver.hidden = !bi; if (bi) ver.textContent = "v" + bi.l.version;
+  put("updated", "Updated " + new Date(now).toLocaleTimeString());
 
-  document.getElementById("g-infer").innerHTML =
-    card("推理服务", up === null ? "—" : (online ? "在线" : (up === 1 ? "异常" : "离线")), "", online ? "ok" : "bad") +
-    card("解码速度", fmt(r.dec, 1, " tok/s"), "实时") +
-    card("预填速度", fmt(r.pre, 0, " tok/s"), "实时，不含缓存命中") +
-    card("单请求解码", fmt(r.perReq, 1, " tok/s"), "区间内平均") +
-    card("MTP 接受率", r.accept === null || r.accept === undefined ? "—" : fmt(r.accept * 100, 1, "%"), "区间内草稿 token") +
-    card("进行中 / 排队", running === null ? "—" : int(running) + " / " + int(waiting), "并发上限 " + int(maxA)) +
-    card("上下文", int(val(s, "redsnow_context_tokens")), "cache tokens");
+  put("t-dec", fmt(r.dec, 1)); put("s-dec", w.perReq === null || w.perReq === undefined ? "" : "avg " + fmt(w.perReq, 1) + " tok/s per request");
+  put("t-pre", fmt(r.pre, 0));
+  put("t-run", running === null ? "—" : int(running)); put("t-slots", maxA === null ? "" : "limit " + int(maxA));
+  put("s-run", waiting === null ? "" : int(waiting) + " queued"); width("b-run", ratio(running, maxA) === null ? null : 100 * running / maxA);
+  put("t-mem", memUsed === null ? "—" : (memUsed / GIB).toFixed(1)); put("t-memp", memPct === null ? "" : Math.round(memPct * 100) + "%");
+  put("s-mem", memTotal === null ? "" : "of " + gb(memTotal) + " unified");
+  put("t-gpu", fmt(gpu, 0)); put("s-gpu", temp === null ? "" : fmt(temp, 0, " °C") + (power === null ? "" : " · " + fmt(power, 0, " W")));
+  put("t-tok", ptok === null || ctok === null ? "—" : compact(ptok + ctok));
+  put("s-tok", ptok === null || ctok === null ? "" : compact(ctok) + " generated · " + compact(ptok) + " prompt");
 
-  document.getElementById("g-total").innerHTML =
-    card("请求数", int(reqs), "") +
-    card("错误数", int(errs), "", errs > 0 ? "bad" : "") +
-    card("prompt tokens", int(val(s, "redsnow_prompt_tokens_total")), "") +
-    card("completion tokens", int(val(s, "redsnow_completion_tokens_total")), "");
+  chip("llm-chip", up === null ? "—" : online ? "healthy" : "offline", up === null ? "" : online ? "ok" : "bad");
+  put("l-per", fmt(w.perReq, 1, " tok/s")); put("l-acc", w.accept === null || w.accept === undefined ? "—" : fmt(w.accept * 100, 1, "%"));
+  put("l-q", w.queue === null || w.queue === undefined ? "—" : fmt(w.queue, 2, " s"));
+  put("l-ctx", int(val(s, "redsnow_context_tokens")));
+  put("l-tok", int(ptok) + " / " + int(ctok));
+  tags("l-fin", s.redsnow_requests_total || [], "finish_reason");
+  tags("l-err", s.redsnow_request_errors_total || [], "code", "bad");
 
-  document.getElementById("g-host").innerHTML =
-    card("GPU 利用率", fmt(gpu, 0, "%"), "温度 " + fmt(temp, 0, " °C")) +
-    card("GPU 功耗", fmt(power, 0, " W"), "SM " + (clock === null ? "—" : fmt(clock / 1e6, 0, " MHz"))) +
-    card("可用内存", bytes(memAvail), "总量 " + bytes(memTotal)) +
-    card("CPU 使用率", fmt(r.cpu, 0, "%"), "load1 " + fmt(val(s, "redsnow_load1"), 2)) +
-    card("磁盘剩余", bytes(diskFree), "总量 " + bytes(diskTotal)) +
-    card("OOM kill", int(val(s, "redsnow_cgroup_oom_kills_total")), "cgroup 累计");
+  chip("gpu-chip", temp === null ? "no data" : temp >= 90 ? "critical" : temp >= 85 ? "hot" : "normal", temp === null ? "" : temp >= 90 ? "bad" : temp >= 85 ? "warn" : "ok");
+  put("g-util", fmt(gpu, 0, "%")); width("b-util", gpu);
+  put("g-temp", fmt(temp, 0, " °C")); width("b-temp", temp === null ? null : temp);
+  $("b-temp").style.background = temp !== null && temp >= 90 ? "var(--bad)" : temp !== null && temp >= 85 ? "var(--warn)" : "var(--ok)";
+  put("g-pow", fmt(power, 1, " W")); put("g-clk", clock === null ? "—" : fmt(clock / 1e6, 0, " MHz"));
 
-  push(hist.dec, now, r.dec); push(hist.pre, now, r.pre);
-  push(hist.gpu, now, gpu); push(hist.mem, now, memAvail === null ? null : memAvail / 1073741824);
-  draw();
+  var memCls = memAvail === null ? "" : memAvail < 1.5 * GIB ? "bad" : memAvail < 3 * GIB ? "warn" : "ok";
+  chip("mem-chip", memAvail === null ? "no data" : memAvail < 1.5 * GIB ? "critical" : memAvail < 3 * GIB ? "low" : "normal", memCls);
+  put("m-av", gb(memAvail) + " / " + gb(memTotal)); width("b-mem", memPct === null ? null : memPct * 100);
+  put("m-cg", gb(val(s, "redsnow_cgroup_memory_current_bytes"))); put("m-oom", int(oom));
+
+  put("y-cpu", fmt(r.cpu, 0, "%")); width("b-cpu", r.cpu === undefined ? null : r.cpu);
+  put("y-load", fmt(val(s, "redsnow_load1"), 2));
+  put("y-disk", gb(diskFree) + " / " + gb(diskTotal)); width("b-disk", ratio(diskFree, diskTotal) === null ? null : 100 * diskFree / diskTotal);
+
+  if (oom !== null && oomBase === null) oomBase = oom;
+  if (up === 1 && healthy !== 1) list.push({sev: "bad", text: "Inference server is reachable but reports unhealthy."});
+  if (up === 0) list.push({sev: "bad", text: "Inference server is offline."});
+  if (temp !== null && temp >= 90) list.push({sev: "bad", text: "GPU temperature " + temp.toFixed(0) + " °C (critical at 90 °C)."});
+  else if (temp !== null && temp >= 85) list.push({sev: "warn", text: "GPU temperature " + temp.toFixed(0) + " °C (warning at 85 °C)."});
+  if (memAvail !== null && memAvail < 1.5 * GIB) list.push({sev: "bad", text: "Only " + gb(memAvail) + " memory available (critical below 1.5 GiB)."});
+  else if (memAvail !== null && memAvail < 3 * GIB) list.push({sev: "warn", text: "Only " + gb(memAvail) + " memory available (warning below 3 GiB)."});
+  if (oom !== null && oomBase !== null && oom > oomBase) list.push({sev: "bad", text: "OOM kills increased by " + (oom - oomBase) + " since this page was opened."});
+  var recent = samps.filter(function (x) { return x.t >= now - 60000; })[0];
+  if (recent && cur.errs !== null && recent.errs !== null && cur.errs > recent.errs) list.push({sev: "warn", text: "Request errors increased by " + (cur.errs - recent.errs) + " in the last minute."});
+  findings(list);
+
+  push(hist.dec, now, r.dec); push(hist.pre, now, r.pre); push(hist.gpu, now, gpu);
+  push(hist.mem, now, memPct === null ? null : memPct * 100);
+  draw(now);
 }
 
 function push(arr, t, v) {
-  arr.push({t: t, v: v});
+  arr.push({t: t, v: v === undefined ? null : v});
   while (arr.length && arr[0].t < t - WINDOW_MS) arr.shift();
 }
-
-var CHARTS = [
-  {id: "dec", title: "解码 tok/s", unit: ""}, {id: "pre", title: "预填 tok/s", unit: ""},
-  {id: "gpu", title: "GPU 利用率 %", unit: "%", max: 100}, {id: "mem", title: "可用内存 GiB", unit: ""}
-];
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
-function draw() {
-  var box = document.getElementById("charts");
-  if (!box.children.length) {
-    box.innerHTML = CHARTS.map(function (c) {
-      return '<div class="card"><div class="k">' + c.title + ' <span id="m-' + c.id + '"></span></div><canvas id="c-' + c.id + '"></canvas></div>';
-    }).join("");
-  }
-  var now = Date.now();
-  CHARTS.forEach(function (c) {
-    var cv = document.getElementById("c-" + c.id), dpr = window.devicePixelRatio || 1;
-    var w = cv.clientWidth, h = cv.clientHeight;
-    cv.width = w * dpr; cv.height = h * dpr;
-    var g = cv.getContext("2d"); g.scale(dpr, dpr);
-    var pts = hist[c.id].filter(function (p) { return p.v !== null; });
-    var last = pts.length ? pts[pts.length - 1].v : null;
-    document.getElementById("m-" + c.id).textContent = last === null ? "—" : last.toFixed(last < 10 ? 1 : 0);
-    var top = c.max || Math.max.apply(null, pts.map(function (p) { return p.v; }).concat([1])) * 1.15;
-    g.strokeStyle = css("--line"); g.lineWidth = 1;
-    g.beginPath(); g.moveTo(0, h - 0.5); g.lineTo(w, h - 0.5); g.stroke();
-    g.fillStyle = css("--muted"); g.font = "11px sans-serif"; g.fillText(top.toFixed(top < 10 ? 1 : 0), 2, 11);
+function draw(now) {
+  now = now || Date.now();
+  Array.prototype.forEach.call(document.querySelectorAll("canvas.spark"), function (cv) {
+    var dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    var g = cv.getContext("2d"), color = css(cv.dataset.c);
+    g.scale(dpr, dpr);
+    var key = cv.dataset.h, pts = hist[key].filter(function (p) { return p.v !== null; });
     if (pts.length < 2) return;
-    g.strokeStyle = css("--accent"); g.lineWidth = 1.5; g.beginPath();
-    pts.forEach(function (p, i) {
-      var x = w - (now - p.t) / WINDOW_MS * w, y = h - Math.min(p.v / top, 1) * (h - 4) - 2;
-      if (i) g.lineTo(x, y); else g.moveTo(x, y);
-    });
+    var top = key === "gpu" || key === "mem" ? 100 : Math.max.apply(null, pts.map(function (p) { return p.v; }).concat([1])) * 1.15;
+    var xy = pts.map(function (p) { return [w - (now - p.t) / WINDOW_MS * w, h - 4 - Math.min(p.v / top, 1) * (h - 8)]; });
+    var grad = g.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, color); grad.addColorStop(1, "transparent");
+    g.globalAlpha = .22; g.fillStyle = grad; g.beginPath(); g.moveTo(xy[0][0], h);
+    xy.forEach(function (p) { g.lineTo(p[0], p[1]); });
+    g.lineTo(xy[xy.length - 1][0], h); g.closePath(); g.fill();
+    g.globalAlpha = 1; g.strokeStyle = color; g.lineWidth = 1.6; g.lineJoin = "round"; g.beginPath();
+    xy.forEach(function (p, i) { if (i) g.lineTo(p[0], p[1]); else g.moveTo(p[0], p[1]); });
     g.stroke();
+    var e = xy[xy.length - 1]; g.fillStyle = color; g.beginPath(); g.arc(e[0], e[1], 3, 0, 6.2832); g.fill();
   });
 }
 
-function setStatus(msg, err) {
-  var el = document.getElementById("status");
-  el.textContent = msg; el.className = err ? "err" : "";
+function showLogin(msg) {
+  $("login").style.display = "block"; $("signout").hidden = true;
+  put("login-err", msg || "");
+  $("token").focus();
 }
-
 function poll() {
   fetch("/metrics", {headers: {Authorization: "Bearer " + token}, cache: "no-store"}).then(function (res) {
-    if (res.status === 401) {
-      stop(); clear(); setStatus("Token 错误，请重新输入", true); return null;
-    }
+    if (res.status === 401) { stop(); clearTok(); chip("state", "Invalid token", "bad"); showLogin("Invalid token. Enter it again."); return null; }
     if (!res.ok) throw new Error("HTTP " + res.status);
     return res.text();
   }).then(function (text) {
-    if (text === null) return;
-    render(parse(text), Date.now());
-    setStatus("已连接，每 2 秒刷新 · " + new Date().toLocaleTimeString());
+    if (text !== null) render(parse(text), Date.now());
   }).catch(function (e) {
-    setStatus("拉取失败：" + e.message, true);
+    chip("state", "Unreachable", "bad"); put("updated", "Fetch failed: " + e.message);
   });
 }
 function stop() { if (timer) { clearInterval(timer); timer = null; } }
 function start(t) {
-  stop(); token = t; prev = null;
+  stop(); token = t; prev = null; samps = []; oomBase = null;
   hist = {dec: [], pre: [], gpu: [], mem: []};
+  $("login").style.display = "none"; $("signout").hidden = false; put("login-err", "");
   poll(); timer = setInterval(poll, 2000);
 }
 
-document.getElementById("login").addEventListener("submit", function (ev) {
+$("form").addEventListener("submit", function (ev) {
   ev.preventDefault();
-  var t = document.getElementById("token").value.trim();
+  var t = $("token").value.trim();
   if (!t) return;
-  save(t); document.getElementById("token").value = ""; start(t);
+  save(t); $("token").value = ""; start(t);
 });
-window.addEventListener("resize", draw);
+$("signout").addEventListener("click", function () { stop(); clearTok(); chip("state", "Not connected"); showLogin(""); });
+window.addEventListener("resize", function () { draw(); });
 var saved = load();
-if (saved) start(saved);
+if (saved) start(saved); else showLogin("");
 </script>
 </body>
 </html>
