@@ -271,6 +271,150 @@ def test_unreachable_upstream_health_is_quiet():
     assert "/health" not in logged, logged
 
 
+def _serve_metrics(upstream_metrics, paths, token=None):
+    """起假上游（/metrics 返回给定文本；None 表示上游不可达）和代理，依次 GET paths。"""
+    import contextlib
+    import io
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+    import urllib.error
+    import urllib.request
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = (upstream_metrics or "").encode()
+            self.send_response(200 if self.path == "/metrics" else 404)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    servers = [ThreadingHTTPServer(("127.0.0.1", 0), auth_proxy.Handler)]
+    if upstream_metrics is None:
+        import socket
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            target = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    else:
+        servers.append(HTTPServer(("127.0.0.1", 0), Upstream))
+        target = f"http://127.0.0.1:{servers[1].server_port}"
+    for server in servers:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    old_upstream = auth_proxy.UPSTREAM
+    auth_proxy.UPSTREAM = target
+    buf = io.StringIO()
+    results = {}
+    try:
+        with contextlib.redirect_stderr(buf):
+            for path in paths:
+                headers = {} if token == "" else {"Authorization": f"Bearer {token or auth_proxy.TOKEN}"}
+                req = urllib.request.Request(f"http://127.0.0.1:{servers[0].server_port}{path}", headers=headers)
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        results[path] = (resp.status, resp.headers.get("Content-Type"), resp.read().decode())
+                except urllib.error.HTTPError as exc:
+                    results[path] = (exc.code, exc.headers.get("Content-Type"), exc.read().decode())
+    finally:
+        auth_proxy.UPSTREAM = old_upstream
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+    return results, buf.getvalue()
+
+
+def test_metrics_requires_token():
+    results, _ = _serve_metrics("", ["/metrics"], token="wrong")
+    assert results["/metrics"][0] == 401, results
+    results, _ = _serve_metrics("", ["/metrics"], token="")
+    assert results["/metrics"][0] == 401, results
+
+
+def test_metrics_merges_host_and_upstream():
+    upstream = "# TYPE redsnow_generation_tokens_total counter\nredsnow_generation_tokens_total 42\n"
+    results, logged = _serve_metrics(upstream, ["/metrics"])
+    status, ctype, body = results["/metrics"]
+    assert status == 200, results
+    assert ctype.startswith("text/plain"), ctype
+    assert "redsnow_generation_tokens_total 42\n" in body, body
+    assert "redsnow_upstream_up 1\n" in body, body
+    assert "redsnow_memory_available_bytes " in body or not os.path.exists("/proc/meminfo"), body
+    assert 'redsnow_build_info{' in body, body
+    # 面板每两秒拉一次，不能刷访问日志。
+    assert "/metrics" not in logged, logged
+
+
+def test_metrics_when_upstream_down():
+    results, _ = _serve_metrics(None, ["/metrics"])
+    status, _, body = results["/metrics"]
+    assert status == 200, results
+    assert "redsnow_upstream_up 0\n" in body, body
+
+
+def test_host_metrics_from_proc_files():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as root:
+        def put(name, text):
+            path = os.path.join(root, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as handle:
+                handle.write(text)
+            return path
+
+        meminfo = put("meminfo", "MemTotal:       125442396 kB\nMemFree: 1 kB\nMemAvailable:    12800000 kB\n")
+        stat = put("stat", "cpu  100 5 50 1000 20 0 3 0 0 0\ncpu0 1 1 1 1 1 1 1 1 1 1\n")
+        loadavg = put("loadavg", "3.17 3.23 2.05 2/400 12345\n")
+        put("cgroup/memory.current", "9663676416\n")
+        put("cgroup/memory.events", "low 0\nhigh 0\nmax 2\noom 1\noom_kill 1\noom_group_kill 0\n")
+        text = "".join(
+            auth_proxy.host_metrics(
+                meminfo=meminfo, stat=stat, loadavg=loadavg, cgroup=os.path.join(root, "cgroup"), clk_tck=100
+            )
+        )
+    assert "redsnow_memory_total_bytes 128453013504\n" in text, text
+    assert "redsnow_memory_available_bytes 13107200000\n" in text, text
+    assert 'redsnow_cpu_seconds_total{mode="user"} 1.0\n' in text, text
+    assert 'redsnow_cpu_seconds_total{mode="idle"} 10.0\n' in text, text
+    assert "redsnow_load1 3.17\n" in text, text
+    assert "redsnow_cgroup_memory_current_bytes 9663676416\n" in text, text
+    assert "redsnow_cgroup_oom_kills_total 1\n" in text, text
+
+
+def test_host_metrics_skip_missing_files():
+    text = "".join(
+        auth_proxy.host_metrics(
+            meminfo="/nonexistent/meminfo", stat="/nonexistent/stat", loadavg="/nonexistent/loadavg",
+            cgroup="/nonexistent/cgroup", clk_tck=100,
+        )
+    )
+    assert "redsnow_memory_total_bytes" not in text, text
+    assert "redsnow_cgroup" not in text, text
+
+
+def test_gpu_metrics_parse():
+    lines = "".join(auth_proxy.gpu_metrics("96, 75, 51.23, 2171\n"))
+    assert "redsnow_gpu_utilization_percent 96\n" in lines, lines
+    assert "redsnow_gpu_temperature_celsius 75\n" in lines, lines
+    assert "redsnow_gpu_power_watts 51.23\n" in lines, lines
+    assert "redsnow_gpu_sm_clock_hertz 2171000000\n" in lines, lines
+    assert auth_proxy.gpu_metrics("[N/A], [N/A], [N/A], [N/A]\n") == []
+    assert auth_proxy.gpu_metrics("") == []
+
+
+def test_dashboard_served_without_token():
+    results, logged = _serve_metrics("", ["/dashboard"], token="")
+    status, ctype, body = results["/dashboard"]
+    assert status == 200, results
+    assert ctype.startswith("text/html"), ctype
+    assert "/metrics" in body, "面板要从 /metrics 取数"
+    assert auth_proxy.TOKEN not in body
+    assert "/dashboard" not in logged, logged
+
+
 if __name__ == "__main__":
     test_bind_host()
     test_empty_token_rejects()
@@ -282,4 +426,11 @@ if __name__ == "__main__":
     test_stream_is_not_buffered()
     test_health_requests_are_not_logged()
     test_unreachable_upstream_health_is_quiet()
+    test_metrics_requires_token()
+    test_metrics_merges_host_and_upstream()
+    test_metrics_when_upstream_down()
+    test_host_metrics_from_proc_files()
+    test_host_metrics_skip_missing_files()
+    test_gpu_metrics_parse()
+    test_dashboard_served_without_token()
     print("auth_proxy ok")

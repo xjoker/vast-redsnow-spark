@@ -103,6 +103,23 @@ curl -N <BASE_URL>/chat/completions \
 - 上下文由 `CACHE_SIZE` 决定（默认 262144），输入 token 加 `max_tokens` 超过就返回 400，服务不会裁剪提示词。客户端要在接近上限前自己压缩，`max_tokens` 建议不超过 32000。
 - 经 Cloudflare 访问必须 `stream: true`：非串流请求超过 100 秒会被 Cloudflare 返回 524。首 token 随提示长度线性增长（25 万 token 约 6 分钟），长提示更要串流。
 
+### 监控
+
+- `/dashboard`：只读面板，浏览器打开 `<Base URL 去掉 /v1>/dashboard`，填 `API_TOKEN`。页面本身不含数据，token 只存在当前标签页的 sessionStorage，每 2 秒带 Bearer 拉 `/metrics`；显示实时解码/预填速度、排队、MTP 接受率、GPU、内存、CPU、磁盘和最近 15 分钟曲线，缺失的指标显示「—」。
+- `/metrics`：Prometheus 文本格式，和其他接口一样要 Bearer。指标前缀 `redsnow_`：推理侧有生成/预填 token、请求数（按 finish_reason）、错误数（按 code）、草稿 token 接受/拒绝、预填/解码/排队耗时、运行与排队请求数、上下文大小；主机侧有 GPU 利用率/温度/功耗/SM 频率、内存、CPU 时间、load1、cgroup 内存与 OOM kill、磁盘、镜像版本；`redsnow_upstream_up` 为 0 表示推理服务没起来，此时只剩主机指标。预填 token 不含每个请求的第一块（那里混有前缀缓存命中）。
+
+Prometheus 抓取示例：
+
+```yaml
+scrape_configs:
+  - job_name: redsnow
+    scheme: https
+    metrics_path: /metrics
+    authorization: {type: Bearer, credentials_file: /etc/prometheus/redsnow_token}
+    static_configs:
+      - targets: ['<隧道主机>']
+```
+
 ## 环境变量
 
 必填只有 `API_TOKEN`。完整模板见 `.env.example`。部署表单里留空 = 使用默认值。

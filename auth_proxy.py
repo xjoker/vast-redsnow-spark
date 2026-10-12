@@ -6,7 +6,9 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -24,6 +26,17 @@ ALLOWED = {
     "/chat/completions",
 }
 HEALTH_PATHS = {"/health", "/v1/health"}
+METRICS_PATH = "/metrics"
+DASHBOARD_PATH = "/dashboard"
+DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
+# 面板和 Prometheus 轮询的路径，记访问日志会刷屏。
+QUIET_PATHS = HEALTH_PATHS | {METRICS_PATH, DASHBOARD_PATH}
+CPU_MODES = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal")
+GPU_QUERY = "utilization.gpu,temperature.gpu,power.draw,clocks.sm"
+# nvidia-smi 一次约百毫秒；面板和 Prometheus 同时拉时共用一份结果。
+GPU_CACHE_SECONDS = 2.0
+_gpu_cache = {"at": 0.0, "lines": []}
+_gpu_lock = threading.Lock()
 MODEL_PREFIXES = ("/v1/models/", "/models/")
 DROP_HEADERS = {
     "connection",
@@ -63,6 +76,124 @@ def is_health_path(path: str) -> bool:
     return urlsplit(path).path in HEALTH_PATHS
 
 
+def metric(name: str, kind: str, help_text: str, samples: list[tuple[str, object]]) -> str:
+    out = f"# HELP {name} {help_text}\n# TYPE {name} {kind}\n"
+    return out + "".join(f"{name}{labels} {value}\n" for labels, value in samples)
+
+
+# nvidia-smi --format=csv,noheader,nounits 的一行。GB10 上读不到的字段是 [N/A]，整组不输出。
+def gpu_metrics(csv: str) -> list[str]:
+    fields = [f.strip() for f in csv.strip().splitlines()[0].split(",")] if csv.strip() else []
+    try:
+        util, temp, power, clock = int(fields[0]), int(fields[1]), float(fields[2]), int(fields[3])
+    except (IndexError, ValueError):
+        return []
+    return [
+        metric("redsnow_gpu_utilization_percent", "gauge", "GPU utilization.", [("", util)]),
+        metric("redsnow_gpu_temperature_celsius", "gauge", "GPU temperature.", [("", temp)]),
+        metric("redsnow_gpu_power_watts", "gauge", "GPU power draw.", [("", power)]),
+        metric("redsnow_gpu_sm_clock_hertz", "gauge", "GPU SM clock.", [("", clock * 1_000_000)]),
+    ]
+
+
+def read_gpu() -> list[str]:
+    with _gpu_lock:
+        if time.monotonic() - _gpu_cache["at"] >= GPU_CACHE_SECONDS:
+            try:
+                out = subprocess.run(
+                    ["nvidia-smi", f"--query-gpu={GPU_QUERY}", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                ).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                out = ""
+            _gpu_cache["lines"] = gpu_metrics(out)
+            _gpu_cache["at"] = time.monotonic()
+        return list(_gpu_cache["lines"])
+
+
+def read_text(path: str) -> str | None:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+# 读不到的文件对应的指标直接不输出，不用 0 冒充。
+def host_metrics(
+    meminfo: str = "/proc/meminfo",
+    stat: str = "/proc/stat",
+    loadavg: str = "/proc/loadavg",
+    cgroup: str = "/sys/fs/cgroup",
+    clk_tck: int | None = None,
+) -> list[str]:
+    out = []
+    mem = {}
+    for line in (read_text(meminfo) or "").splitlines():
+        key, _, rest = line.partition(":")
+        if rest.strip().endswith(" kB"):
+            mem[key] = int(rest.split()[0]) * 1024
+    if "MemTotal" in mem:
+        out.append(metric("redsnow_memory_total_bytes", "gauge", "Host MemTotal.", [("", mem["MemTotal"])]))
+    if "MemAvailable" in mem:
+        out.append(metric("redsnow_memory_available_bytes", "gauge",
+                          "Host MemAvailable; GB10 GPU memory comes from the same pool.", [("", mem["MemAvailable"])]))
+    first = (read_text(stat) or "").splitlines()[:1]
+    if first and first[0].startswith("cpu "):
+        ticks = first[0].split()[1:1 + len(CPU_MODES)]
+        hz = clk_tck or os.sysconf("SC_CLK_TCK")
+        out.append(metric("redsnow_cpu_seconds_total", "counter", "CPU time summed over all cores.",
+                          [(f'{{mode="{mode}"}}', int(t) / hz) for mode, t in zip(CPU_MODES, ticks)]))
+    load = (read_text(loadavg) or "").split()
+    if load:
+        out.append(metric("redsnow_load1", "gauge", "1-minute load average.", [("", float(load[0]))]))
+    current = (read_text(os.path.join(cgroup, "memory.current")) or "").strip()
+    if current.isdigit():
+        out.append(metric("redsnow_cgroup_memory_current_bytes", "gauge", "Container cgroup memory.current.",
+                          [("", int(current))]))
+    for line in (read_text(os.path.join(cgroup, "memory.events")) or "").splitlines():
+        key, _, value = line.partition(" ")
+        if key == "oom_kill" and value.strip().isdigit():
+            out.append(metric("redsnow_cgroup_oom_kills_total", "counter", "Container cgroup OOM kills.",
+                              [("", int(value))]))
+    try:
+        disk = os.statvfs("/")
+    except OSError:
+        disk = None
+    if disk is not None:
+        out.append(metric("redsnow_disk_total_bytes", "gauge", "Root filesystem size.",
+                          [("", disk.f_blocks * disk.f_frsize)]))
+        out.append(metric("redsnow_disk_free_bytes", "gauge", "Root filesystem free space.",
+                          [("", disk.f_bavail * disk.f_frsize)]))
+    return out
+
+
+def label_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+# 上游 /metrics 不通时只少推理那一段，主机指标照常输出。
+def metrics_text() -> str:
+    parts = [
+        metric("redsnow_build_info", "gauge", "Image build.", [(
+            '{version="%s",git_commit="%s"}' % (
+                label_value(os.environ.get("IMAGE_VERSION") or "unknown"),
+                label_value(os.environ.get("GIT_COMMIT") or "unknown"),
+            ), 1)]),
+    ]
+    parts += host_metrics()
+    parts += read_gpu()
+    try:
+        with urllib.request.urlopen(UPSTREAM + METRICS_PATH, timeout=2) as upstream:
+            inference = upstream.read().decode()
+        up = 1
+    except (urllib.error.URLError, OSError, UnicodeError):
+        inference, up = "", 0
+    parts.append(metric("redsnow_upstream_up", "gauge", "Inference server reachable.", [("", up)]))
+    parts.append(inference)
+    return "".join(parts)
+
+
 def check_bind_host(host: str) -> str:
     if host in {"::", ""}:
         raise SystemExit(f"认证代理绑定地址无效: {host!r}")
@@ -84,8 +215,8 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:
-        # 加载期健康检查每几秒一次，不记会刷屏。
-        if is_health_path(getattr(self, "path", "")):
+        # 加载期健康检查每几秒一次，面板每两秒拉指标，不记会刷屏。
+        if urlsplit(getattr(self, "path", "")).path in QUIET_PATHS:
             return
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         sys.stderr.write("%s [redsnow] %s %s\n" % (stamp, self.address_string(), fmt % args))
@@ -142,11 +273,28 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def send_body(self, ctype: str, body: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+
     def proxy(self) -> None:
+        path = urlsplit(self.path).path
+        # 面板页面本身不含数据，浏览器里填 token 后再带 Bearer 拉 /metrics。
+        if self.command == "GET" and path == DASHBOARD_PATH:
+            with open(DASHBOARD_FILE, "rb") as handle:
+                self.send_body("text/html; charset=utf-8", handle.read())
+            return
         if not authorized(self.headers.get("Authorization", "")):
             self.reject(401, "unauthorized")
             return
-        path = urlsplit(self.path).path
+        if self.command == "GET" and path == METRICS_PATH:
+            self.send_body("text/plain; version=0.0.4; charset=utf-8", metrics_text().encode())
+            return
         if self.command == "GET":
             for prefix in MODEL_PREFIXES:
                 if path.startswith(prefix) and len(path) > len(prefix):

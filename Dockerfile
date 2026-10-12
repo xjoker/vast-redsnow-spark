@@ -104,7 +104,7 @@ RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spar
  && cp /tmp/redsnow/LICENSE /usr/share/licenses/redsnow-server/LICENSE \
  && rm -rf /tmp/redsnow
 
-COPY auth_proxy.py download_model.py /opt/redsnow/
+COPY auth_proxy.py dashboard.html download_model.py /opt/redsnow/
 COPY entrypoint.sh /opt/redsnow/entrypoint.sh
 RUN chmod 755 /opt/redsnow/entrypoint.sh /opt/redsnow/auth_proxy.py /opt/redsnow/download_model.py
 

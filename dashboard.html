@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>推理监控</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --text: #1c2430; --muted: #6b7686; --line: #e2e6ec;
+  --accent: #2563eb; --ok: #15803d; --bad: #b91c1c; --warn: #b45309;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161c; --card: #1b2129; --text: #e6e9ee; --muted: #8b95a5; --line: #2b333e;
+    --accent: #60a5fa; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 20px 0 8px; }
+form { display: flex; gap: 8px; flex-wrap: wrap; }
+input { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); min-width: 0; width: 260px; max-width: 100%; }
+button { padding: 6px 12px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; }
+#status { color: var(--muted); font-size: 12px; }
+#status.err { color: var(--bad); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.card .k { color: var(--muted); font-size: 12px; }
+.card .v { font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.card .s { color: var(--muted); font-size: 12px; }
+.ok { color: var(--ok); } .bad { color: var(--bad); }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+canvas { width: 100%; height: 110px; display: block; }
+@media (max-width: 480px) { .grid { grid-template-columns: 1fr 1fr; } input { width: 100%; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>推理监控 <span id="ver" class="s"></span></h1>
+    <form id="login">
+      <input id="token" type="password" placeholder="API Token" autocomplete="off" aria-label="API Token">
+      <button type="submit">连接</button>
+    </form>
+  </header>
+  <div id="status">请输入 API Token</div>
+
+  <h2>推理</h2>
+  <div class="grid" id="g-infer"></div>
+  <h2>累计</h2>
+  <div class="grid" id="g-total"></div>
+  <h2>主机</h2>
+  <div class="grid" id="g-host"></div>
+  <h2>最近 15 分钟</h2>
+  <div class="charts" id="charts"></div>
+</main>
+<script>
+"use strict";
+var KEY = "redsnow_token", WINDOW_MS = 15 * 60 * 1000, token = "", timer = null;
+var prev = null, hist = {dec: [], pre: [], gpu: [], mem: []};
+
+function load() { try { return sessionStorage.getItem(KEY) || ""; } catch (e) { return ""; } }
+function save(v) { try { sessionStorage.setItem(KEY, v); } catch (e) {} }
+function clear() { try { sessionStorage.removeItem(KEY); } catch (e) {} }
+
+// 解析 Prometheus 文本：返回 {name: [{l: {label: value}, v: number}]}
+function parse(text) {
+  var out = {};
+  text.split("\n").forEach(function (line) {
+    if (!line || line[0] === "#") return;
+    var m = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{(.*)\})?\s+(\S+)/.exec(line);
+    if (!m) return;
+    var labels = {}, re = /([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g, x;
+    while ((x = re.exec(m[3] || "")) !== null) labels[x[1]] = x[2].replace(/\\(.)/g, function (_, c) { return c === "n" ? "\n" : c; });
+    var v = parseFloat(m[4]);
+    if (isNaN(v)) return;
+    (out[m[1]] = out[m[1]] || []).push({l: labels, v: v});
+  });
+  return out;
+}
+function one(s, name, label, value) {
+  var arr = s[name];
+  if (!arr) return null;
+  for (var i = 0; i < arr.length; i++) if (!label || arr[i].l[label] === value) return arr[i];
+  return null;
+}
+function val(s, name, label, value) { var r = one(s, name, label, value); return r ? r.v : null; }
+function sum(s, name) { var a = s[name]; if (!a) return null; return a.reduce(function (t, r) { return t + r.v; }, 0); }
+
+// 两次采样求速率；缺任一端或计数器回退（重启）返回 null。
+function rate(cur, old, dt) {
+  if (cur === null || old === null || cur < old || dt <= 0) return null;
+  return (cur - old) / dt;
+}
+function ratio(num, den) { return num === null || den === null || den <= 0 ? null : num / den; }
+
+function fmt(v, d, unit) {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  return v.toFixed(d) + (unit || "");
+}
+function bytes(v) {
+  if (v === null) return "—";
+  var u = ["B", "KiB", "MiB", "GiB", "TiB"], i = 0;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(i > 1 ? 1 : 0) + " " + u[i];
+}
+function int(v) { return v === null ? "—" : Math.round(v).toLocaleString(); }
+
+function sample(s, t) {
+  var cpu = {}, total = 0;
+  (s.redsnow_cpu_seconds_total || []).forEach(function (r) { cpu[r.l.mode] = r.v; total += r.v; });
+  return {
+    t: t,
+    gen: val(s, "redsnow_generation_tokens_total"),
+    pre: val(s, "redsnow_prefill_tokens_total"),
+    acc: val(s, "redsnow_draft_tokens_total", "result", "accepted"),
+    rej: val(s, "redsnow_draft_tokens_total", "result", "rejected"),
+    comp: val(s, "redsnow_completion_tokens_total"),
+    decSec: val(s, "redsnow_decode_seconds_total"),
+    cpuTotal: s.redsnow_cpu_seconds_total ? total : null,
+    cpuIdle: s.redsnow_cpu_seconds_total ? (cpu.idle || 0) + (cpu.iowait || 0) : null
+  };
+}
+
+function card(k, v, sub, cls) {
+  return '<div class="card"><div class="k">' + k + '</div><div class="v ' + (cls || "") + '">' + v +
+    '</div><div class="s">' + (sub || "&nbsp;") + '</div></div>';
+}
+
+function render(s, now) {
+  var cur = sample(s, now), r = {};
+  if (prev && cur.t > prev.t) {
+    var dt = (cur.t - prev.t) / 1000;
+    r.dec = rate(cur.gen, prev.gen, dt);
+    r.pre = rate(cur.pre, prev.pre, dt);
+    var da = rate(cur.acc, prev.acc, 1), dr = rate(cur.rej, prev.rej, 1);
+    r.accept = da !== null && dr !== null ? ratio(da, da + dr) : null;
+    var dc = rate(cur.comp, prev.comp, 1), ds = rate(cur.decSec, prev.decSec, 1);
+    r.perReq = dc !== null && ds !== null && ds > 0 ? dc / ds : null;
+    var dTot = rate(cur.cpuTotal, prev.cpuTotal, 1), dIdle = rate(cur.cpuIdle, prev.cpuIdle, 1);
+    r.cpu = dTot !== null && dIdle !== null && dTot > 0 ? 100 * (1 - dIdle / dTot) : null;
+  }
+  prev = cur;
+
+  var memAvail = val(s, "redsnow_memory_available_bytes"), memTotal = val(s, "redsnow_memory_total_bytes");
+  var gpu = val(s, "redsnow_gpu_utilization_percent");
+  var up = val(s, "redsnow_upstream_up"), healthy = val(s, "redsnow_inference_healthy");
+  var running = val(s, "redsnow_requests_running"), waiting = val(s, "redsnow_requests_waiting");
+  var maxA = val(s, "redsnow_max_active_requests");
+  var reqs = sum(s, "redsnow_requests_total"), errs = sum(s, "redsnow_request_errors_total");
+  var diskFree = val(s, "redsnow_disk_free_bytes"), diskTotal = val(s, "redsnow_disk_total_bytes");
+  var power = val(s, "redsnow_gpu_power_watts"), clock = val(s, "redsnow_gpu_sm_clock_hertz");
+  var temp = val(s, "redsnow_gpu_temperature_celsius");
+  var online = up === 1 && healthy === 1;
+
+  var bi = one(s, "redsnow_build_info");
+  document.getElementById("ver").textContent = bi ? "镜像 " + bi.l.version : "";
+
+  document.getElementById("g-infer").innerHTML =
+    card("推理服务", up === null ? "—" : (online ? "在线" : (up === 1 ? "异常" : "离线")), "", online ? "ok" : "bad") +
+    card("解码速度", fmt(r.dec, 1, " tok/s"), "实时") +
+    card("预填速度", fmt(r.pre, 0, " tok/s"), "实时，不含缓存命中") +
+    card("单请求解码", fmt(r.perReq, 1, " tok/s"), "区间内平均") +
+    card("MTP 接受率", r.accept === null || r.accept === undefined ? "—" : fmt(r.accept * 100, 1, "%"), "区间内草稿 token") +
+    card("进行中 / 排队", running === null ? "—" : int(running) + " / " + int(waiting), "并发上限 " + int(maxA)) +
+    card("上下文", int(val(s, "redsnow_context_tokens")), "cache tokens");
+
+  document.getElementById("g-total").innerHTML =
+    card("请求数", int(reqs), "") +
+    card("错误数", int(errs), "", errs > 0 ? "bad" : "") +
+    card("prompt tokens", int(val(s, "redsnow_prompt_tokens_total")), "") +
+    card("completion tokens", int(val(s, "redsnow_completion_tokens_total")), "");
+
+  document.getElementById("g-host").innerHTML =
+    card("GPU 利用率", fmt(gpu, 0, "%"), "温度 " + fmt(temp, 0, " °C")) +
+    card("GPU 功耗", fmt(power, 0, " W"), "SM " + (clock === null ? "—" : fmt(clock / 1e6, 0, " MHz"))) +
+    card("可用内存", bytes(memAvail), "总量 " + bytes(memTotal)) +
+    card("CPU 使用率", fmt(r.cpu, 0, "%"), "load1 " + fmt(val(s, "redsnow_load1"), 2)) +
+    card("磁盘剩余", bytes(diskFree), "总量 " + bytes(diskTotal)) +
+    card("OOM kill", int(val(s, "redsnow_cgroup_oom_kills_total")), "cgroup 累计");
+
+  push(hist.dec, now, r.dec); push(hist.pre, now, r.pre);
+  push(hist.gpu, now, gpu); push(hist.mem, now, memAvail === null ? null : memAvail / 1073741824);
+  draw();
+}
+
+function push(arr, t, v) {
+  arr.push({t: t, v: v});
+  while (arr.length && arr[0].t < t - WINDOW_MS) arr.shift();
+}
+
+var CHARTS = [
+  {id: "dec", title: "解码 tok/s", unit: ""}, {id: "pre", title: "预填 tok/s", unit: ""},
+  {id: "gpu", title: "GPU 利用率 %", unit: "%", max: 100}, {id: "mem", title: "可用内存 GiB", unit: ""}
+];
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+function draw() {
+  var box = document.getElementById("charts");
+  if (!box.children.length) {
+    box.innerHTML = CHARTS.map(function (c) {
+      return '<div class="card"><div class="k">' + c.title + ' <span id="m-' + c.id + '"></span></div><canvas id="c-' + c.id + '"></canvas></div>';
+    }).join("");
+  }
+  var now = Date.now();
+  CHARTS.forEach(function (c) {
+    var cv = document.getElementById("c-" + c.id), dpr = window.devicePixelRatio || 1;
+    var w = cv.clientWidth, h = cv.clientHeight;
+    cv.width = w * dpr; cv.height = h * dpr;
+    var g = cv.getContext("2d"); g.scale(dpr, dpr);
+    var pts = hist[c.id].filter(function (p) { return p.v !== null; });
+    var last = pts.length ? pts[pts.length - 1].v : null;
+    document.getElementById("m-" + c.id).textContent = last === null ? "—" : last.toFixed(last < 10 ? 1 : 0);
+    var top = c.max || Math.max.apply(null, pts.map(function (p) { return p.v; }).concat([1])) * 1.15;
+    g.strokeStyle = css("--line"); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, h - 0.5); g.lineTo(w, h - 0.5); g.stroke();
+    g.fillStyle = css("--muted"); g.font = "11px sans-serif"; g.fillText(top.toFixed(top < 10 ? 1 : 0), 2, 11);
+    if (pts.length < 2) return;
+    g.strokeStyle = css("--accent"); g.lineWidth = 1.5; g.beginPath();
+    pts.forEach(function (p, i) {
+      var x = w - (now - p.t) / WINDOW_MS * w, y = h - Math.min(p.v / top, 1) * (h - 4) - 2;
+      if (i) g.lineTo(x, y); else g.moveTo(x, y);
+    });
+    g.stroke();
+  });
+}
+
+function setStatus(msg, err) {
+  var el = document.getElementById("status");
+  el.textContent = msg; el.className = err ? "err" : "";
+}
+
+function poll() {
+  fetch("/metrics", {headers: {Authorization: "Bearer " + token}, cache: "no-store"}).then(function (res) {
+    if (res.status === 401) {
+      stop(); clear(); setStatus("Token 错误，请重新输入", true); return null;
+    }
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return res.text();
+  }).then(function (text) {
+    if (text === null) return;
+    render(parse(text), Date.now());
+    setStatus("已连接，每 2 秒刷新 · " + new Date().toLocaleTimeString());
+  }).catch(function (e) {
+    setStatus("拉取失败：" + e.message, true);
+  });
+}
+function stop() { if (timer) { clearInterval(timer); timer = null; } }
+function start(t) {
+  stop(); token = t; prev = null;
+  hist = {dec: [], pre: [], gpu: [], mem: []};
+  poll(); timer = setInterval(poll, 2000);
+}
+
+document.getElementById("login").addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  var t = document.getElementById("token").value.trim();
+  if (!t) return;
+  save(t); document.getElementById("token").value = ""; start(t);
+});
+window.addEventListener("resize", draw);
+var saved = load();
+if (saved) start(saved);
+</script>
+</body>
+</html>

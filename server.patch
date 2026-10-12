@@ -107,7 +107,7 @@ index e8dd153..2f9f79e 100644
                  freq_p=pick("frequency_penalty", 0.0), rep_sustain_range=1024,
                  rep_decay_range=1024, temp_last=True, adaptive_target=1.0, adaptive_decay=0.9)
 diff --git a/server/serve_glm.py b/server/serve_glm.py
-index 4945f6d..dfc50fc 100755
+index 4945f6d..500d3c9 100755
 --- a/server/serve_glm.py
 +++ b/server/serve_glm.py
 @@ -34,6 +34,43 @@ from protocol import APIError, dumps, loads, normalize_request, sampling_options
@@ -205,8 +205,17 @@ index 4945f6d..dfc50fc 100755
  
  
  class Handler(BaseHTTPRequestHandler):
-@@ -129,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
+@@ -127,9 +192,16 @@ class Handler(BaseHTTPRequestHandler):
+             state = self.app.worker.status()
+             self.send_json(200 if state["healthy"] else 503,
                             {"status": "healthy" if state["healthy"] else "unhealthy", **state})
++        elif path == "/metrics":
++            raw = self.app.worker.metrics_text(self.app.cache_size).encode()
++            self.send_response(200)
++            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
++            self.send_header("Content-Length", str(len(raw)))
++            self.end_headers()
++            self.wfile.write(raw)
          elif path in ("/models", "/v1/models"):
              self.send_json(200, {"object": "list", "data": [{"id": self.app.served_name,
 -                "object": "model", "owned_by": "vcruz305-exllamav3",
@@ -214,7 +223,7 @@ index 4945f6d..dfc50fc 100755
                  "max_model_len": self.app.context_limit, "cache_size": self.app.cache_size,
                  "max_active_requests": self.app.worker.max_active,
                  "chat_template_sha256": self.app.template_hash}]})
-@@ -160,11 +225,12 @@ class Handler(BaseHTTPRequestHandler):
+@@ -160,11 +232,12 @@ class Handler(BaseHTTPRequestHandler):
              request, parser, prompt_tokens, kwargs = self.app.prepare(body)
              ticket = self.app.worker.submit(**kwargs)
              cid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
@@ -229,16 +238,26 @@ index 4945f6d..dfc50fc 100755
  
              if request.stream:
                  self.send_response(200)
-@@ -211,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
+@@ -211,7 +284,8 @@ class Handler(BaseHTTPRequestHandler):
                      self.sse_done()
                  else:
                      self.send_json(200, {**base, "object": "chat.completion", "choices": [
 -                        {"index": 0, "message": msg, "finish_reason": finish}], "usage": stats})
 +                        {"index": 0, "message": msg, "logprobs": None, "finish_reason": finish}], "usage": stats})
++                self.app.worker.record_finish(finish, stats)
                  print(dumps({"request_id": cid, "finish_reason": finish, "usage": stats}), flush=True)
                  break
          except (BrokenPipeError, ConnectionResetError, socket.timeout):
-@@ -285,6 +351,9 @@ def main():
+@@ -222,6 +296,8 @@ class Handler(BaseHTTPRequestHandler):
+             else:
+                 traceback.print_exc()
+                 error = APIError("Internal server error", 500, "server_error")
++            if not getattr(error, "counted", False):
++                self.app.worker.record_error(error.code)
+             try:
+                 if started_stream:
+                     self.sse(error.payload())
+@@ -285,6 +361,9 @@ def main():
      parser.add_argument("--max-pending-requests", type=int, default=32)
      parser.add_argument("--request-timeout", type=float, default=1800)
      parser.add_argument("--expected-template-sha256")
@@ -248,7 +267,7 @@ index 4945f6d..dfc50fc 100755
      args = parser.parse_args()
      if not (1 <= args.max_active_requests <= args.autosplit_max_batch_size):
          parser.error("max-active-requests must be positive and <= autosplit_max_batch_size")
-@@ -316,13 +385,25 @@ def main():
+@@ -316,13 +395,25 @@ def main():
          stops.append(name)
      print(f"Stop conditions: {stops}", flush=True)
  
@@ -276,10 +295,126 @@ index 4945f6d..dfc50fc 100755
      print(f"Native API listening {args.host}:{args.port}; max_active={args.max_active_requests}", flush=True)
      try:
 diff --git a/server/worker.py b/server/worker.py
-index 56fcb9b..e745c92 100644
+index 56fcb9b..b16fae8 100644
 --- a/server/worker.py
 +++ b/server/worker.py
-@@ -64,6 +64,19 @@ class GenerationWorker:
+@@ -5,7 +5,7 @@ import contextlib
+ import queue
+ import threading
+ import uuid
+-from collections import deque
++from collections import defaultdict, deque
+ from dataclasses import dataclass, field
+ 
+ from protocol import APIError
+@@ -32,15 +32,19 @@ class GenerationWorker:
+         self.tickets = {}
+         self.failed = None
+         self.closed = False
++        self.stats_lock = threading.Lock()
++        self.progress = {}
++        self.counters = defaultdict(float)
++        self.finishes, self.errors = defaultdict(int), defaultdict(int)
+         self.thread = threading.Thread(target=self._run, name="native-generator", daemon=True)
+         self.thread.start()
+ 
+     def submit(self, **kwargs):
+         with self.lock:
+             if self.failed or self.closed or not self.thread.is_alive():
+-                raise APIError("Inference worker unavailable", 503, "engine_unavailable")
++                raise self._counted(APIError("Inference worker unavailable", 503, "engine_unavailable"))
+             if not self.capacity.acquire(blocking=False):
+-                raise APIError("Inference queue is full", 429, "queue_full")
++                raise self._counted(APIError("Inference queue is full", 429, "queue_full"))
+             ticket = Ticket(kwargs)
+             self.tickets[ticket.identifier] = ticket
+             self.inbox.put(ticket)
+@@ -52,10 +56,84 @@ class GenerationWorker:
+ 
+     def _retire(self, ticket):
+         with self.lock:
++            self.progress.pop(ticket.identifier, None)
+             if self.tickets.pop(ticket.identifier, None) is not None:
+                 self.capacity.release()
+ 
++    def _counted(self, error):
++        # serve_glm 据此跳过已计数的错误，避免同一个错误记两次。
++        self.record_error(error.code)
++        error.counted = True
++        return error
++
++    def record_finish(self, finish_reason, stats):
++        with self.stats_lock:
++            self.finishes[finish_reason] += 1
++            c = self.counters
++            c["prompt_tokens"] += stats.get("prompt_tokens", 0)
++            c["completion_tokens"] += stats.get("completion_tokens", 0)
++            c["prefill_seconds"] += stats.get("time_prefill", 0)
++            c["decode_seconds"] += stats.get("time_generate", 0)
++            c["queue_seconds"] += stats.get("time_enqueued", 0)
++
++    def record_error(self, code):
++        with self.stats_lock:
++            self.errors[code] += 1
++
++    def record_draft(self, accepted, rejected):
++        with self.stats_lock:
++            self.counters["draft_accepted"] += accepted
++            self.counters["draft_rejected"] += rejected
++
++    def metrics_text(self, context_tokens):
++        state = self.status()
++        with self.lock:
++            running = len(self.tickets)
++        running_n = min(running, self.max_active)
++        with self.stats_lock:
++            c, finishes, errors = dict(self.counters), dict(self.finishes), dict(self.errors)
++        out = []
++
++        def put(name, kind, help_text, samples):
++            out.append(f"# HELP {name} {help_text}\n# TYPE {name} {kind}\n")
++            for labels, value in samples:
++                out.append(f"{name}{labels} {value}\n")
++
++        def lbl(key, value):
++            return '{%s="%s"}' % (key, str(value).replace("\\", "\\\\").replace('"', '\\"'))
++
++        put("redsnow_generation_tokens_total", "counter", "Tokens decoded.",
++            [("", int(c.get("generation_tokens", 0)))])
++        put("redsnow_prefill_tokens_total", "counter",
++            "Prompt tokens prefilled (first chunk of each request excluded).",
++            [("", int(c.get("prefill_tokens", 0)))])
++        put("redsnow_requests_total", "counter", "Finished requests by finish_reason.",
++            [(lbl("finish_reason", k), v) for k, v in sorted(finishes.items())])
++        put("redsnow_request_errors_total", "counter", "Failed requests by error code.",
++            [(lbl("code", k), v) for k, v in sorted(errors.items())])
++        put("redsnow_prompt_tokens_total", "counter", "Prompt tokens of finished requests.",
++            [("", int(c.get("prompt_tokens", 0)))])
++        put("redsnow_completion_tokens_total", "counter", "Completion tokens of finished requests.",
++            [("", int(c.get("completion_tokens", 0)))])
++        put("redsnow_draft_tokens_total", "counter", "MTP draft tokens by result.",
++            [(lbl("result", "accepted"), int(c.get("draft_accepted", 0))),
++             (lbl("result", "rejected"), int(c.get("draft_rejected", 0)))])
++        put("redsnow_prefill_seconds_total", "counter", "Seconds spent in prefill.",
++            [("", round(c.get("prefill_seconds", 0), 6))])
++        put("redsnow_decode_seconds_total", "counter", "Seconds spent decoding.",
++            [("", round(c.get("decode_seconds", 0), 6))])
++        put("redsnow_queue_seconds_total", "counter", "Seconds requests waited in queue.",
++            [("", round(c.get("queue_seconds", 0), 6))])
++        put("redsnow_requests_running", "gauge", "Requests being generated.", [("", running_n)])
++        put("redsnow_requests_waiting", "gauge", "Requests queued.", [("", running - running_n)])
++        put("redsnow_max_active_requests", "gauge", "Concurrent request limit.", [("", self.max_active)])
++        put("redsnow_context_tokens", "gauge", "KV cache size in tokens.", [("", context_tokens)])
++        put("redsnow_inference_healthy", "gauge", "1 if the worker is healthy.",
++            [("", 1 if state["healthy"] else 0)])
++        return "".join(out)
++
+     def _error(self, ticket, error):
++        self._counted(error)
+         while True:
+             try:
+                 ticket.events.get_nowait()
+@@ -64,6 +142,19 @@ class GenerationWorker:
          ticket.events.put_nowait(error)
          self._retire(ticket)
  
@@ -299,7 +434,7 @@ index 56fcb9b..e745c92 100644
      def _run(self):
          active, waiting = {}, deque()
          try:
-@@ -98,10 +111,32 @@ class GenerationWorker:
+@@ -98,10 +189,33 @@ class GenerationWorker:
                          active[ticket.identifier] = ticket
                      if not active:
                          continue
@@ -327,6 +462,7 @@ index 56fcb9b..e745c92 100644
 +                        ticket = active.get(ident)
                          if ticket is None:
                              continue
++                        self._count_event(event, ticket)
 +                        if event.get("stage") == "error":
 +                            self._fail_job(ticket, event.get("error"))
 +                            del active[ident]
@@ -334,3 +470,29 @@ index 56fcb9b..e745c92 100644
                          # Avoid retaining GPU tensors, logits, or Job references
                          # in slow HTTP queues.
                          safe = {k: event[k] for k in (
+@@ -138,6 +252,25 @@ class GenerationWorker:
+             for ticket in outstanding:
+                 self._error(ticket, APIError(self.failed or "Server is closing", 503, "engine_unavailable"))
+ 
++    def _count_event(self, event, ticket):
++        progress = self.progress
++        stage = event.get("stage")
++        if stage == "prefill":
++            now = event.get("curr_progress", 0)
++            last = progress.get(ticket.identifier)
++            progress[ticket.identifier] = now
++            # 首条事件含前缀缓存命中的部分，只当基线，否则会把缓存命中算成预填速度。
++            if last is not None and now > last:
++                with self.stats_lock:
++                    self.counters["prefill_tokens"] += now - last
++        elif stage == "streaming":
++            ids = event.get("token_ids")
++            if ids is not None:
++                with self.stats_lock:
++                    self.counters["generation_tokens"] += ids.shape[-1]
++        if event.get("eos"):
++            self.record_draft(event.get("accepted_draft_tokens", 0), event.get("rejected_draft_tokens", 0))
++
+     def status(self):
+         with self.lock:
+             return {"healthy": not self.failed and not self.closed and self.thread.is_alive(),
