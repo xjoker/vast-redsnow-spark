@@ -81,7 +81,7 @@ Only `API_TOKEN` is required. Everything else has a default; see `.env.example` 
 | `MODEL_DOWNLOAD` | `1` | `0`: never download; without a complete model inference is skipped while SSH and the proxy keep running |
 | `CACHE_SIZE` | `262144` | KV cache and `--max-model-len` (tokens) |
 | `NUM_DRAFT_TOKENS` | `2` | MTP draft tokens |
-| `MAX_ACTIVE_REQUESTS` | `1` | Concurrent generation slots; with more than 1 use `CACHE_SIZE=131072 NUM_DRAFT_TOKENS=1` |
+| `MAX_ACTIVE_REQUESTS` | `3` | Concurrent generation slots; they share the `CACHE_SIZE` pool and the total throughput. Above 3 use `CACHE_SIZE=131072 NUM_DRAFT_TOKENS=1` |
 | `VISION` | `1` | `0` skips the vision tower; requests with images return 400 |
 | `MAX_IMAGE_TOKENS` | processor default (8000) | Per-image token cap |
 | `GPU_SPLIT_GB` | `112` | VRAM split (`-gs`), aligned with upstream `serve.sh` |
@@ -105,6 +105,7 @@ DGX Spark (GB10), exllamav3 fork aa86ccd7, thinking off.
 | Prefill, 200K / 250K tokens | ~700 tok/s, needle test OK |
 | 4 slots, `CACHE_SIZE=131072`, `NUM_DRAFT_TOKENS=1`, 4x1K | 34.8 tok/s aggregate |
 | Same setup, 4x32K and 4x60K | pass |
+| 3 slots (default), `CACHE_SIZE=262144`, 3x32K / 3x60K / 3x80K | pass, ~11 tok/s decode and ~240 tok/s prefill per request, lowest free memory 3.25 GiB |
 
 ## Limits
 

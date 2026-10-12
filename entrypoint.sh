@@ -848,7 +848,7 @@ main() {
   MODEL_DOWNLOAD="${MODEL_DOWNLOAD:-1}"
   MODEL_DOWNLOAD_WORKERS="${MODEL_DOWNLOAD_WORKERS:-8}"
   # -ambs makes exllamav3 reserve memory for the same batch size at load time, so it must be at least the number of concurrent slots; use the same value here.
-  MAX_ACTIVE_REQUESTS="${MAX_ACTIVE_REQUESTS:-1}"
+  MAX_ACTIVE_REQUESTS="${MAX_ACTIVE_REQUESTS:-3}"
   EASYTIER_PRIVATE_MODE="${EASYTIER_PRIVATE_MODE:-1}"
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
   log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} download_workers=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-processor default} CF_TUNNEL=${CF_TUNNEL} METRICS_INTERVAL=${METRICS_INTERVAL}"
@@ -881,8 +881,8 @@ main() {
     exit 1
   fi
   # Measured: with a cache pool above 131072 several long prompts prefill at once, and 2x60K already hits CUDA OOM; at 131072 the pool staggers most prefills.
-  if (( MAX_ACTIVE_REQUESTS > 1 )) && [[ "$CACHE_SIZE" =~ ^[0-9]+$ ]] && (( CACHE_SIZE > 131072 )); then
-    log "warn: MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} with CACHE_SIZE=${CACHE_SIZE} has not passed the long-prompt test; several long requests prefilling at once will OOM (the single request gets 503). For multiple slots use CACHE_SIZE=131072 NUM_DRAFT_TOKENS=1."
+  if (( MAX_ACTIVE_REQUESTS > 3 )) && [[ "$CACHE_SIZE" =~ ^[0-9]+$ ]] && (( CACHE_SIZE > 131072 )); then
+    log "warn: MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} with CACHE_SIZE=${CACHE_SIZE} has not passed the long-prompt test; several long requests prefilling at once will OOM (the single request gets 503). Up to 3 slots passed 3x80K at 262144; for more slots use CACHE_SIZE=131072 NUM_DRAFT_TOKENS=1."
   fi
   case "$EASYTIER_PRIVATE_MODE" in
     0 | 1) ;;

@@ -262,14 +262,18 @@ done
 ) || fail "max active requests validation"
 (
   # Give private mode an invalid value so main exits right after the warning.
-  API_TOKEN=tok MAX_ACTIVE_REQUESTS=2 EASYTIER_PRIVATE_MODE=2
+  # set -e is off inside a subshell tested with ||, so chain the checks.
+  API_TOKEN=tok MAX_ACTIVE_REQUESTS=4 EASYTIER_PRIVATE_MODE=2
   (main) >/dev/null 2>"$et_dir/slots.err" || true
-  grep -q 'warn: MAX_ACTIVE_REQUESTS=2 with CACHE_SIZE=262144' "$et_dir/slots.err"
-  CACHE_SIZE=131072
-  (main) >/dev/null 2>"$et_dir/slots2.err" || true
+  grep -q 'warn: MAX_ACTIVE_REQUESTS=4 with CACHE_SIZE=262144' "$et_dir/slots.err" &&
+  MAX_ACTIVE_REQUESTS=3 &&
+  { (main) >/dev/null 2>"$et_dir/slots3.err" || true; } &&
+  ! grep -q 'warn: MAX_ACTIVE_REQUESTS' "$et_dir/slots3.err" &&
+  MAX_ACTIVE_REQUESTS=4 CACHE_SIZE=131072 &&
+  { (main) >/dev/null 2>"$et_dir/slots2.err" || true; } &&
   ! grep -q 'warn: MAX_ACTIVE_REQUESTS' "$et_dir/slots2.err"
 ) || fail "multi-slot cache warning"
-grep -q 'MAX_ACTIVE_REQUESTS="${MAX_ACTIVE_REQUESTS:-1}"' entrypoint.sh || fail "max active default"
+grep -q 'MAX_ACTIVE_REQUESTS="${MAX_ACTIVE_REQUESTS:-3}"' entrypoint.sh || fail "max active default"
 grep -q -- '--max-active-requests "${MAX_ACTIVE_REQUESTS}" -ambs "${MAX_ACTIVE_REQUESTS}"' entrypoint.sh || fail "max active serve args"
 if grep -Eq '[$][{]?ET_' entrypoint.sh; then fail "reads user ET_ variables"; fi
 rm -rf "$et_dir"
