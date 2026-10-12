@@ -29,7 +29,7 @@ Watch `vastai logs <INSTANCE_ID>`. When the `Model ready: connection info` banne
 - Always stream through Cloudflare: non-streaming requests over 100 s get 524.
 - Context is `CACHE_SIZE` (default 262144); input plus `max_tokens` beyond it returns 400. Keep `max_tokens` at or below 32000 and compact long conversations on the client.
 
-opencode (`~/.config/opencode/opencode.json`, set `baseURL` to the banner's Base URL):
+opencode (`~/.config/opencode/opencode.json`, set `baseURL` to the banner's Base URL). When the tunnel URL changes, update `baseURL`; new opencode sessions pick it up, but an already open session keeps the old URL and fails with `ECONNRESET` or a certificate error until opencode is restarted:
 
 ```json
 {
