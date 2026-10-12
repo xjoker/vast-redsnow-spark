@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import collections
 import hmac
 import json
 import os
@@ -13,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 UPSTREAM = os.environ["UPSTREAM"]
 TOKEN = os.environ["API_TOKEN"]
@@ -27,10 +28,11 @@ ALLOWED = {
 }
 HEALTH_PATHS = {"/health", "/v1/health"}
 METRICS_PATH = "/metrics"
+HISTORY_PATH = "/metrics/history"
 DASHBOARD_PATH = "/dashboard"
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
 # Paths polled by the dashboard and Prometheus; logging them would flood the access log.
-QUIET_PATHS = HEALTH_PATHS | {METRICS_PATH, DASHBOARD_PATH}
+QUIET_PATHS = HEALTH_PATHS | {METRICS_PATH, HISTORY_PATH, DASHBOARD_PATH}
 CPU_MODES = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal")
 GPU_QUERY = "utilization.gpu,temperature.gpu,power.draw,clocks.sm"
 # nvidia-smi takes ~100 ms per call; the dashboard and Prometheus share one cached result.
@@ -194,6 +196,85 @@ def metrics_text() -> str:
     return "".join(parts)
 
 
+# One history sample is a flat tuple: unix time, then the raw values below (None when a source is missing).
+# Counters stay raw so the browser derives rates exactly as it does for live polls.
+HISTORY_FIELDS = (
+    "t", "gen", "pre", "mem_avail", "mem_total", "gpu", "temp", "power",
+    "running", "waiting", "up", "cpu_total", "cpu_idle",
+)
+HISTORY: collections.deque = collections.deque()
+HISTORY_INTERVAL = 5.0
+_history_lock = threading.Lock()
+
+
+def parse_prom(text: str) -> dict[str, list[tuple[str, float]]]:
+    out: dict[str, list[tuple[str, float]]] = {}
+    for line in text.splitlines():
+        if not line or line[0] == "#":
+            continue
+        head, _, raw = line.rpartition(" ")
+        name, _, labels = head.partition("{")
+        try:
+            out.setdefault(name, []).append((labels, float(raw)))
+        except ValueError:
+            continue
+    return out
+
+
+def history_sample(text: str, now: float) -> tuple:
+    doc = parse_prom(text)
+
+    def one(name: str) -> float | None:
+        return doc[name][0][1] if name in doc else None
+
+    cpu = doc.get("redsnow_cpu_seconds_total")
+    return (
+        round(now, 1), one("redsnow_generation_tokens_total"), one("redsnow_prefill_tokens_total"),
+        one("redsnow_memory_available_bytes"), one("redsnow_memory_total_bytes"),
+        one("redsnow_gpu_utilization_percent"), one("redsnow_gpu_temperature_celsius"),
+        one("redsnow_gpu_power_watts"), one("redsnow_requests_running"), one("redsnow_requests_waiting"),
+        one("redsnow_upstream_up"),
+        sum(v for _, v in cpu) if cpu else None,
+        sum(v for labels, v in cpu if 'mode="idle"' in labels or 'mode="iowait"' in labels) if cpu else None,
+    )
+
+
+def record_history() -> None:
+    sample = history_sample(metrics_text(), time.time())
+    with _history_lock:
+        HISTORY.append(sample)
+
+
+def history_loop() -> None:
+    while True:
+        try:
+            record_history()
+        except Exception as exc:  # the thread must outlive any single bad sample
+            sys.stderr.write("%s [redsnow] history sample failed: %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), exc))
+        time.sleep(HISTORY_INTERVAL)
+
+
+def history_json(since: float) -> bytes:
+    with _history_lock:
+        rows = [list(s) for s in HISTORY if s[0] > since]
+    return json.dumps({"interval": HISTORY_INTERVAL, "fields": HISTORY_FIELDS, "samples": rows}, separators=(",", ":")).encode()
+
+
+def configure_history() -> None:
+    global HISTORY, HISTORY_INTERVAL
+    values = {}
+    for name, default in (("HISTORY_INTERVAL", "5"), ("HISTORY_HOURS", "24")):
+        raw = os.environ.get(name, default)
+        try:
+            values[name] = float(raw)
+        except ValueError as exc:
+            raise SystemExit(f"{name} is not a number: {raw}") from exc
+        if values[name] <= 0:
+            raise SystemExit(f"{name} must be positive: {raw}")
+    HISTORY_INTERVAL = values["HISTORY_INTERVAL"]
+    HISTORY = collections.deque(maxlen=max(1, int(values["HISTORY_HOURS"] * 3600 / HISTORY_INTERVAL)))
+
+
 def check_bind_host(host: str) -> str:
     if host in {"::", ""}:
         raise SystemExit(f"invalid auth proxy bind address: {host!r}")
@@ -292,6 +373,14 @@ class Handler(BaseHTTPRequestHandler):
         if not authorized(self.headers.get("Authorization", "")):
             self.reject(401, "unauthorized")
             return
+        if self.command == "GET" and path == HISTORY_PATH:
+            try:
+                since = float(parse_qs(urlsplit(self.path).query).get("since", ["0"])[0])
+            except ValueError:
+                self.reject(400, "bad since")
+                return
+            self.send_body("application/json", history_json(since))
+            return
         if self.command == "GET" and path == METRICS_PATH:
             self.send_body("text/plain; version=0.0.4; charset=utf-8", metrics_text().encode())
             return
@@ -375,6 +464,8 @@ def main() -> None:
         raise SystemExit("API_TOKEN environment variable is required")
     host = check_bind_host(os.environ.get("PROXY_HOST", "0.0.0.0"))
     port = int(os.environ["PROXY_PORT"])
+    configure_history()
+    threading.Thread(target=history_loop, daemon=True).start()
     sys.stderr.write(
         "%s [redsnow] auth proxy listening on %s:%s upstream %s\n"
         % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), host, port, UPSTREAM)

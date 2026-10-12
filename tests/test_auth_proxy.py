@@ -415,6 +415,80 @@ def test_dashboard_served_without_token():
     assert "/dashboard" not in logged, logged
 
 
+def test_history_requires_token():
+    results, _ = _serve_metrics("", ["/metrics/history"], token="wrong")
+    assert results["/metrics/history"][0] == 401, results
+    results, _ = _serve_metrics("", ["/metrics/history"], token="")
+    assert results["/metrics/history"][0] == 401, results
+
+
+def test_history_records_samples_and_filters_since():
+    import json
+
+    upstream = "redsnow_generation_tokens_total 120\nredsnow_requests_running 1\n"
+    old_upstream = auth_proxy.UPSTREAM
+    import collections
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = upstream.encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    old_history = auth_proxy.HISTORY
+    auth_proxy.HISTORY = collections.deque(maxlen=100)
+    auth_proxy.UPSTREAM = f"http://127.0.0.1:{server.server_port}"
+    try:
+        auth_proxy.record_history()
+        auth_proxy.record_history()
+        newest = auth_proxy.HISTORY[-1][0]
+        results, logged = _serve_metrics(upstream, ["/metrics/history", f"/metrics/history?since={newest}"])
+    finally:
+        auth_proxy.UPSTREAM = old_upstream
+        auth_proxy.HISTORY = old_history
+        server.shutdown()
+        server.server_close()
+    status, ctype, body = results["/metrics/history"]
+    doc = json.loads(body)
+    assert status == 200 and ctype == "application/json", results
+    assert doc["fields"][:3] == ["t", "gen", "pre"], doc
+    assert len(doc["samples"]) == 2, doc
+    gen = doc["fields"].index("gen")
+    assert doc["samples"][0][gen] == 120, doc
+    assert doc["samples"][0][doc["fields"].index("running")] == 1, doc
+    assert json.loads(results[f"/metrics/history?since={newest}"][2])["samples"] == [], results
+    assert "/metrics/history" not in logged, logged
+
+
+def test_history_survives_upstream_down():
+    import collections
+    import json
+
+    old_history = auth_proxy.HISTORY
+    auth_proxy.HISTORY = collections.deque(maxlen=100)
+    old_upstream = auth_proxy.UPSTREAM
+    auth_proxy.UPSTREAM = "http://127.0.0.1:1"
+    try:
+        auth_proxy.record_history()
+        sample = auth_proxy.HISTORY[-1]
+    finally:
+        auth_proxy.UPSTREAM = old_upstream
+        auth_proxy.HISTORY = old_history
+    fields = auth_proxy.HISTORY_FIELDS
+    assert sample[fields.index("up")] == 0, sample
+    assert sample[fields.index("gen")] is None, sample
+    assert json.loads(json.dumps(list(sample))), sample
+
+
 if __name__ == "__main__":
     test_bind_host()
     test_empty_token_rejects()
@@ -433,4 +507,7 @@ if __name__ == "__main__":
     test_host_metrics_skip_missing_files()
     test_gpu_metrics_parse()
     test_dashboard_served_without_token()
+    test_history_requires_token()
+    test_history_records_samples_and_filters_since()
+    test_history_survives_upstream_down()
     print("auth_proxy ok")

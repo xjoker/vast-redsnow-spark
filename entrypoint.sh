@@ -754,7 +754,7 @@ format_serve_output() {
       continue
     fi
     case "$line" in
-      *'"GET /health HTTP/'*|*'"GET /v1/health HTTP/'*)
+      *'"GET /health HTTP/'*|*'"GET /v1/health HTTP/'*|*'"GET /metrics HTTP/'*)
         ;;
       " -- Mixed-K "*)
         if [[ "$line" =~ $re_layer ]] && ((10#${BASH_REMATCH[1]} % 10 == 0)); then

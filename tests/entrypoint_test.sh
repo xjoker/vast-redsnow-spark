@@ -531,9 +531,10 @@ mixed_out=$(printf '%s\n' \
 if grep -q 'layers.31\|layer 31' <<<"$mixed_out"; then fail "layer 31 should be dropped"; fi
 grep -q 'loading weights layer 30' <<<"$mixed_out" || fail "layer 30 progress"
 if grep -q 'Mixed-K' <<<"$mixed_out"; then fail "mixed-k noise leaked"; fi
-health_out=$(printf '%s\n' '127.0.0.1 "GET /health HTTP/1.1" 200 -' '127.0.0.1 "GET /v1/models HTTP/1.1" 200 -' \
+health_out=$(printf '%s\n' '127.0.0.1 "GET /health HTTP/1.1" 200 -' '127.0.0.1 "GET /metrics HTTP/1.1" 200 -' '127.0.0.1 "GET /v1/models HTTP/1.1" 200 -' \
   | format_serve_output 2>&1)
 if grep -q 'GET /health' <<<"$health_out"; then fail "upstream health access leaked"; fi
+if grep -q 'GET /metrics' <<<"$health_out"; then fail "upstream metrics access leaked"; fi
 grep -q 'GET /v1/models' <<<"$health_out" || fail "upstream access kept"
 
 tunnel_dir=$(mktemp -d)

@@ -57,6 +57,7 @@ opencode (`~/.config/opencode/opencode.json`, set `baseURL` to the banner's Base
 
 - Logs: everything also goes to `vastai logs`; the persistent copy survives restarts: `tail -F /workspace/logs/redsnow.log` (3 GiB cap by default).
 - `/dashboard`: read-only page; open `<Base URL without /v1>/dashboard` and enter `API_TOKEN`. The page itself holds no data; it polls `/metrics` every 2 s with the Bearer token (kept in sessionStorage).
+- `/metrics/history`: Bearer required; JSON samples the proxy has recorded since container start (`?since=<unix ts>` for newer ones only), which the dashboard uses to draw its charts.
 - `/metrics`: Prometheus text format (prefix `redsnow_`), Bearer required. `redsnow_upstream_up` 0 means inference is down and only host metrics remain.
 
 ```yaml
@@ -86,6 +87,8 @@ Only `API_TOKEN` is required. Everything else has a default; see `.env.example` 
 | `GPU_SPLIT_GB` | `112` | VRAM split (`-gs`), aligned with upstream `serve.sh` |
 | `EXL3_UMA_RESERVE_MB` | auto | Memory kept for the system; 6144 is chosen automatically on ~119.6 GiB hosts (fork default 8192). Do not go below 6144 |
 | `CF_TUNNEL` | `1` | `0` disables the tunnel; `CF_TUNNEL_TOKEN` switches to a named tunnel |
+| `HISTORY_INTERVAL` | `5` | Seconds between samples the proxy records for the dashboard charts |
+| `HISTORY_HOURS` | `24` | Hours of samples kept in memory (about 8 MB at the defaults) |
 | `METRICS_INTERVAL` | `60` | Seconds between one-line metrics in the log, `0` disables |
 | `LOG_DIR` | `/workspace/logs` | Directory for the persistent copy of the container log (`redsnow.log`, rotated) |
 | `LOG_MAX_MB` | `3072` | Total size cap of the persistent log across rotated files, `0` disables it |

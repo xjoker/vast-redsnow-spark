@@ -32,6 +32,10 @@ h1 { font-size: 28px; line-height: 1.1; margin: 0 0 6px; letter-spacing: -.01em;
 .chip.bad { background: var(--badbg); color: var(--bad); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 button { font: inherit; padding: 6px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); cursor: pointer; }
+.range { display: inline-flex; gap: 4px; }
+.range button { padding: 4px 10px; font-size: 12px; }
+.range button[aria-pressed="true"] { background: var(--blue); border-color: var(--blue); color: #fff; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 input { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card2); color: var(--text); min-width: 0; width: 280px; max-width: 100%; }
@@ -74,7 +78,15 @@ canvas.tall { height: 64px; }
         <span id="updated"></span>
       </div>
     </div>
-    <button id="signout" type="button" hidden>Sign out</button>
+    <div class="actions">
+      <div class="range" id="range" role="group" aria-label="Chart range">
+        <button type="button" data-m="15" aria-pressed="true">15 min</button>
+        <button type="button" data-m="60" aria-pressed="false">1 h</button>
+        <button type="button" data-m="360" aria-pressed="false">6 h</button>
+        <button type="button" data-m="1440" aria-pressed="false">24 h</button>
+      </div>
+      <button id="signout" type="button" hidden>Sign out</button>
+    </div>
   </header>
 
   <section class="card" id="login">
@@ -98,8 +110,8 @@ canvas.tall { height: 64px; }
   <div class="grid panels">
     <section class="card">
       <h2>LLM <span class="chip" id="llm-chip">—</span></h2>
-      <div class="sec">Decode, last 15 min</div><canvas class="spark tall" data-h="dec" data-c="--amber"></canvas>
-      <div class="sec">Prefill, last 15 min</div><canvas class="spark tall" data-h="pre" data-c="--violet"></canvas>
+      <div class="sec">Decode, last <span class="rng">15 min</span></div><canvas class="spark tall" data-h="dec" data-c="--amber"></canvas>
+      <div class="sec">Prefill, last <span class="rng">15 min</span></div><canvas class="spark tall" data-h="pre" data-c="--violet"></canvas>
       <div class="row"><span>Avg per-request decode</span><b id="l-per">—</b></div>
       <div class="row"><span>MTP acceptance</span><b id="l-acc">—</b></div>
       <div class="row"><span>Avg queue time</span><b id="l-q">—</b></div>
@@ -146,11 +158,14 @@ canvas.tall { height: 64px; }
 </main>
 <script>
 "use strict";
-var KEY = "redsnow_token", WINDOW_MS = 15 * 60 * 1000, GIB = 1073741824;
+var KEY = "redsnow_token", RANGE_KEY = "redsnow_range", AVG_MS = 15 * 60 * 1000, KEEP_MS = 24 * 3600 * 1000, GIB = 1073741824;
+var RANGES = {"15": "15 min", "60": "1 h", "360": "6 h", "1440": "24 h"}, rangeMin = "15";
+var SAMPLE_MS = 5000, MAX_POINTS = 600;
 var token = "", timer = null, prev = null, samps = [], oomBase = null;
 var hist = {dec: [], pre: [], gpu: [], mem: []};
 
 function load() { try { return sessionStorage.getItem(KEY) || ""; } catch (e) { return ""; } }
+function loadRange() { try { var r = sessionStorage.getItem(RANGE_KEY); return RANGES[r] ? r : "15"; } catch (e) { return "15"; } }
 function save(v) { try { sessionStorage.setItem(KEY, v); } catch (e) {} }
 function clearTok() { try { sessionStorage.removeItem(KEY); } catch (e) {} }
 function $(id) { return document.getElementById(id); }
@@ -245,7 +260,7 @@ function render(s, now) {
   }
   prev = cur;
   samps.push(cur);
-  while (samps.length > 1 && samps[0].t < now - WINDOW_MS) samps.shift();
+  while (samps.length > 1 && samps[0].t < now - AVG_MS) samps.shift();
   old = samps[0];
   // Window averages: oldest vs newest sample inside the 15-minute window.
   var w = {};
@@ -318,14 +333,35 @@ function render(s, now) {
   if (recent && cur.errs !== null && recent.errs !== null && cur.errs > recent.errs) list.push({sev: "warn", text: "Request errors increased by " + (cur.errs - recent.errs) + " in the last minute."});
   findings(list);
 
-  push(hist.dec, now, r.dec); push(hist.pre, now, r.pre); push(hist.gpu, now, gpu);
-  push(hist.mem, now, memPct === null ? null : memPct * 100);
+  // Chart points are kept at the server's sampling pace so 24 h stays small; the tiles above still update every poll.
+  var last = hist.gpu.length ? hist.gpu[hist.gpu.length - 1].t : 0;
+  if (now - last >= SAMPLE_MS - 500) {
+    push(hist.dec, now, r.dec); push(hist.pre, now, r.pre); push(hist.gpu, now, gpu);
+    push(hist.mem, now, memPct === null ? null : memPct * 100);
+  }
   draw(now);
 }
 
 function push(arr, t, v) {
   arr.push({t: t, v: v === undefined ? null : v});
-  while (arr.length && arr[0].t < t - WINDOW_MS) arr.shift();
+  while (arr.length && arr[0].t < t - KEEP_MS) arr.shift();
+}
+
+// Server samples (fields: t, gen, pre, mem_avail, mem_total, gpu, ...) -> chart series; rates come from consecutive counter deltas.
+function seed(doc) {
+  var f = {};
+  doc.fields.forEach(function (name, i) { f[name] = i; });
+  var rows = doc.samples, cut = Date.now() - KEEP_MS;
+  rows.forEach(function (row, i) {
+    var t = row[f.t] * 1000;
+    if (t < cut) return;
+    var p = i ? rows[i - 1] : null, dt = p ? row[f.t] - p[f.t] : 0;
+    push(hist.dec, t, p ? rate(row[f.gen], p[f.gen], dt) : null);
+    push(hist.pre, t, p ? rate(row[f.pre], p[f.pre], dt) : null);
+    push(hist.gpu, t, row[f.gpu]);
+    var used = row[f.mem_avail] !== null && row[f.mem_total] ? 100 * (1 - row[f.mem_avail] / row[f.mem_total]) : null;
+    push(hist.mem, t, used);
+  });
 }
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
@@ -337,10 +373,15 @@ function draw(now) {
     cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
     var g = cv.getContext("2d"), color = css(cv.dataset.c);
     g.scale(dpr, dpr);
-    var key = cv.dataset.h, pts = hist[key].filter(function (p) { return p.v !== null; });
+    var key = cv.dataset.h, span = Number(rangeMin) * 60000;
+    var pts = hist[key].filter(function (p) { return p.v !== null && p.t >= now - span; });
+    if (pts.length > MAX_POINTS) {
+      var step = pts.length / MAX_POINTS;
+      pts = pts.filter(function (p, i) { return i === pts.length - 1 || Math.floor(i / step) !== Math.floor((i - 1) / step); });
+    }
     if (pts.length < 2) return;
     var top = key === "gpu" || key === "mem" ? 100 : Math.max.apply(null, pts.map(function (p) { return p.v; }).concat([1])) * 1.15;
-    var xy = pts.map(function (p) { return [w - (now - p.t) / WINDOW_MS * w, h - 4 - Math.min(p.v / top, 1) * (h - 8)]; });
+    var xy = pts.map(function (p) { return [w - (now - p.t) / span * w, h - 4 - Math.min(p.v / top, 1) * (h - 8)]; });
     var grad = g.createLinearGradient(0, 0, 0, h);
     grad.addColorStop(0, color); grad.addColorStop(1, "transparent");
     g.globalAlpha = .22; g.fillStyle = grad; g.beginPath(); g.moveTo(xy[0][0], h);
@@ -369,12 +410,26 @@ function poll() {
     chip("state", "Unreachable", "bad"); put("updated", "Fetch failed: " + e.message);
   });
 }
+function setRange(m) {
+  rangeMin = m;
+  try { sessionStorage.setItem(RANGE_KEY, m); } catch (e) {}
+  Array.prototype.forEach.call(document.querySelectorAll("#range button"), function (b) { b.setAttribute("aria-pressed", b.dataset.m === m ? "true" : "false"); });
+  Array.prototype.forEach.call(document.querySelectorAll(".rng"), function (e) { e.textContent = RANGES[m]; });
+  draw();
+}
 function stop() { if (timer) { clearInterval(timer); timer = null; } }
 function start(t) {
   stop(); token = t; prev = null; samps = []; oomBase = null;
   hist = {dec: [], pre: [], gpu: [], mem: []};
   $("login").style.display = "none"; $("signout").hidden = false; put("login-err", "");
-  poll(); timer = setInterval(poll, 2000);
+  // Seed the charts with what the proxy recorded since the container started; without it the live poll still works.
+  fetch("/metrics/history", {headers: {Authorization: "Bearer " + t}, cache: "no-store"}).then(function (res) {
+    return res.ok ? res.json() : null;
+  }).catch(function () { return null; }).then(function (doc) {
+    if (token !== t) return;
+    if (doc && doc.samples) seed(doc);
+    poll(); timer = setInterval(poll, 2000);
+  });
 }
 
 $("form").addEventListener("submit", function (ev) {
@@ -383,7 +438,9 @@ $("form").addEventListener("submit", function (ev) {
   if (!t) return;
   save(t); $("token").value = ""; start(t);
 });
-$("signout").addEventListener("click", function () { stop(); clearTok(); chip("state", "Not connected"); showLogin(""); });
+$("signout").addEventListener("click", function () { stop(); token = ""; clearTok(); chip("state", "Not connected"); showLogin(""); });
+Array.prototype.forEach.call(document.querySelectorAll("#range button"), function (b) { b.addEventListener("click", function () { setRange(b.dataset.m); }); });
+setRange(loadRange());
 window.addEventListener("resize", function () { draw(); });
 var saved = load();
 if (saved) start(saved); else showLogin("");
