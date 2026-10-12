@@ -1,10 +1,10 @@
 # Hand-off
 
-For the next AI or engineer. Deployment, variables and connection details are in `README.md`; this file only records current status, verified findings, pitfalls and open items.
+For the next AI or engineer. Deployment steps, update, troubleshooting and release are in [docs/DEPLOY.md](../docs/DEPLOY.md); variables and connection details in [README.md](../README.md). This file records current status, verified findings, pitfalls not covered there and open items.
 
 ## Current status
 
-- Image `ghcr.io/xjoker/redsnow-exl3:20261012.3` (`VERSION`) = exllamav3 vcruz305 fork `aa86ccd7` (rebased on upstream v1.6.1). Vast ENTRYPOINT mode (instance created by CLI) downloads and loads automatically and prints the connection banner for an AI when ready; the anonymous Cloudflare tunnel, EasyTier and periodic metrics are in the image.
+- `main` == image `ghcr.io/xjoker/redsnow-exl3:20261012.3` (commit `56a08ed` and later docs commits). The 20261012.3 features (3 default slots, metrics history from startup, persistent logs) were verified on machine 151363 by hot-patching 20261012.2; the official 20261012.3 image has not yet been re-checked on a real machine. Base: exllamav3 vcruz305 fork `aa86ccd7` (rebased on upstream v1.6.1). Vast ENTRYPOINT mode (instance created by CLI) downloads and loads automatically and prints the connection banner for an AI when ready; the anonymous Cloudflare tunnel, EasyTier and periodic metrics are in the image.
 - Verified on machine 151363 with 20261012.1: load 205 s; decode 32.6 tok/s weighted (previous version 31.8); prefill 707 tok/s at 200K and 699 tok/s at 250K, needle answered correctly; decode 28.7 tok/s at 250K. 4 slots with `CACHE_SIZE=131072 NUM_DRAFT_TOKENS=1`: 4x1K 34.8 tok/s aggregate, 4x32K passed 3/3 (previously OOM), 4x60K pass. Official openai SDK compatibility 17/17; vision OK. Machine 146927 (low-MemTotal host) was not re-tested on this version.
 - New `/metrics` (Prometheus) and `/dashboard` (read-only page) are served by the auth proxy; verified on 151363 by hot-patching 20261012.1 before the 20261012.2 build: 401 without/with a wrong token, host/GPU/inference metrics present, and after a real request the prompt/completion/prefill/generation counters match `usage` exactly (prefill is settled up from `prompt_tokens - cached_tokens` at the end of each request, so short single-chunk prompts are counted too).
 - 20261011.8-.10 on two GB10 machines: 151363 (MemTotal 121.6 GiB) and 146927 (119.6 GiB) both loaded on a cold start in one go, and the 17 compatibility checks passed (146927 over Vast direct, 151363 over the tunnel).
@@ -13,7 +13,7 @@ For the next AI or engineer. Deployment, variables and connection details are in
 - Container output is teed by `log_sink.py` (PID 1 re-execs its fds through it) into `LOG_DIR/redsnow.log` with rotation, `LOG_MAX_MB` total cap (default 3072; 64 MiB files); `vastai logs` still shows everything. Verified on 151363 (hot-patched): PID 1 fds go through the sink, the file holds cloudflared, auth proxy, banner and request lines, the exit line is written before a restart and the next boot appends to the same file; a 1 MiB cap rotates to two files totalling 806 KB. The inference output now goes straight into `format_serve_output` (no /tmp file); the page-cache dropper waits on `SERVE_READY_FILE`.
 - 20261012.3 defaults to 3 slots at `CACHE_SIZE=262144`, `NUM_DRAFT_TOKENS=2`. On 151363 (20261012.2 with the slot override) 3x1K/3x32K/3x60K/3x80K all answered the needle with no OOM; per request ~11 tok/s decode and ~240 tok/s prefill (the slots split the single-stream throughput); lowest MemAvailable 7.99/5.83/4.70/3.25 GiB.
 - The auth proxy records metrics history from startup (in memory, lost on restart) at `/metrics/history`; the dashboard seeds its charts from it. `redsnow_disk_*` is `statvfs("/")`: after a Vast recycle it reports the host disk (3.2 TB on 151363), not the instance's disk quota.
-- Releases are triggered manually with `release.yml`; CI on `main` runs `tests/`.
+- CI on `main` runs `tests/`; release steps are in docs/DEPLOY.md.
 
 ## Constraints (unchanged)
 
@@ -72,29 +72,23 @@ Conclusion: 3-6x slower and misses details; fine for it to write and a human to 
 
 ## Known pitfalls
 
-- Creating ENTRYPOINT mode from the web form fails with `unknown flag --runtime`; use the CLI. `--args` must not be empty or it becomes SSH mode.
-- In ENTRYPOINT mode Vast injects only the account-level SSH Keys as `SSH_PUBLIC_KEY`; keys added to a single instance with `vastai attach ssh` do not reach the container.
-- `vastai recycle instance` right after `vastai update instance` may still use the old config, even when `vastai show instance` already reports the new `image_uuid` (seen 2026-10-12: the recycled container booted 20261012.2 while `image_uuid` said .3). Check the `container start, image <VERSION>` line in `vastai logs` (or `/health`) and recycle again if it is the old version.
-- `vastai update instance --env` takes a JSON object (`{"API_TOKEN": "...", "-p 8898:8898": "1"}`), not the docker-style string that `create` takes; on a parse error the CLI echoes the whole value, secrets included. Build the JSON from secret files and mask the CLI output. Passing `--image` without `--env` makes the console show no variables, although the container keeps them.
-- When the account balance goes negative Vast stops the instance (`intended_status=stopped`) without any message in the container log; the log just ends mid-line.
-- `vastai update instance --env` does not delete variables present at creation: they disappear from `extra_env` but the container keeps the old value (`MAX_ACTIVE_REQUESTS=4` could not be removed). To drop one, set it explicitly to the default or recreate the instance.
-- recycle wipes the container, so weights are downloaded again; after an SSH-mode recycle `/root/.ssh/authorized_keys` was sometimes written with the host uid (128:988); the entrypoint changes it back to root (since 20261011.4).
-- Some hosts get stuck at `docker_build() error writing dockerfile` in SSH mode (also with Ubuntu); switch host. Known bad: machine 150922; good: 151363 (Japan). It cannot be seen from the listing; destroy the instance if it is not running within 3 minutes of start (Loading is not billed).
+- After an SSH-mode recycle `/root/.ssh/authorized_keys` was sometimes written with the host uid (128:988); the entrypoint changes it back to root (since 20261011.4).
 - Vast injects `CONTAINER_RUNTIME=gvisor`, so `/proc/sys/vm/drop_caches` cannot be written; freshly downloaded weights hold ~88 GiB of page cache, and the image default `EXL3_UMA=1` (judge by `MemAvailable`) avoids load failures.
 - Also GB10, but on kernel 6.17.0-1026 (e.g. 146927) MemTotal is 119.63 GiB, 2 GiB less than 151363 on 1022. With the fork default `EXL3_UMA_RESERVE_MB=8192` the first load reported `Insufficient VRAM`, and after a restart the load succeeded but the first request OOMed on the MTP vocab mirror (1.18 GiB). The entrypoint now picks 6144 from MemTotal: 200K tokens and 60K tokens plus 3 images pass with min MemAvailable 2.5 GiB; with 5120 only 0.55 GiB was left and prefill also slowed.
 - SSH uses the direct path, not `sshN.vast.ai`; the network path dropped once at the moment inference restarted and memory was released in bulk (sshd did not die).
 - EasyTier is no-tun only: the container has no `/dev/net/tun` and no `CAP_NET_ADMIN`. Other nodes reach `PROXY_PORT` via the virtual IP only after this node gets one (DHCP or `EASYTIER_IPV4`); a node without a virtual IP only forwards. `EASYTIER_PEERS` must be publicly reachable addresses; `127.0.0.1` is useless.
-- Non-streaming requests over 100 s through Cloudflare return 524; the anonymous tunnel allows at most 200 concurrent requests and its URL changes on every restart.
+- The anonymous tunnel allows at most 200 concurrent requests.
 - The auth proxy must forward chunks with `read1`; `read` waits for 64 KiB, which holds back SSE (fixed, `c616b86`).
 - The model card positions the model as an offensive-security model, and the security classifier interrupted work sessions several times (writing the large-image test script, reading server-layer response code, reproducing failures) for unknown reasons; the large-image tests were finally done with `handoff/scripts/mem_test.py`.
 
 ## Open items
 
-- OpenAI gaps (as needed): `n>1`, `logprobs` (return 400, do not fake them), `/v1/completions`, `/v1/responses`. `/v1/embeddings` does not apply.
-- `response_format` has no constrained decoding (no library); it relies on a system instruction and does not guarantee valid JSON.
+- Re-check 20261012.3 on a real machine (3 slots, metrics history, persistent logs, `/dashboard`).
+- opencode 2.0.26 logs the `reasoning` and `attachment` model keys as "omitted unsupported legacy setting": verify end to end whether reasoning output and image input still work, and adjust the README snippet if not.
+- The named tunnel path (`CF_TUNNEL_TOKEN`) has not been run on a real machine.
+- Optional: a `CF_TUNNEL_HOSTNAME`-style variable so the banner can print the real hostname instead of a placeholder.
+- OpenAI gaps (as needed): `n>1`, `logprobs` (return 400, do not fake them), `/v1/completions`, `/v1/responses`. `response_format` has no constrained decoding.
 - The opencode recommendation `limit.context 230000` is untested.
-- `/metrics` and `/dashboard` need a check on a real machine.
-- No other tasks in flight.
 
 ## handoff/scripts
 
