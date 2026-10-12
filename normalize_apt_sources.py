@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 apt 源里的国家镜像和大陆镜像站改回官方主机。不指定地区。"""
+"""Rewrite country mirrors and mainland mirror sites in apt sources back to the official hosts. No region is pinned."""
 
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ def files_under(raw: str) -> list[Path]:
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
-        print("用法: normalize_apt_sources.py <sources.list 或目录>...", file=sys.stderr)
+        print("usage: normalize_apt_sources.py <sources.list or directory>...", file=sys.stderr)
         return 2
     for raw in argv[1:]:
         for file in files_under(raw):

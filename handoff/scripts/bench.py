@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RED-SNOW 服务压测：功能冒烟、上下文扫描（预填/解码速度 + 大海捞针）、并发。只用标准库。"""
+"""RED-SNOW service benchmark: functional smoke, context sweep (prefill/decode speed + needle in a haystack), concurrency. Standard library only."""
 import json, sys, time, threading, urllib.request, random, argparse
 
 ap = argparse.ArgumentParser()
@@ -23,7 +23,7 @@ def post(body, stream=False, timeout=7200):
 
 
 def chat(messages, max_tokens, **kw):
-    """流式请求，返回 (首字时间, 总时间, usage, 文本)。"""
+    """Streaming request; returns (time to first token, total time, usage, text)."""
     body = {"model": args.model, "messages": messages, "max_tokens": max_tokens, "stream": True,
             "stream_options": {"include_usage": True}, "temperature": 0.7, "top_p": 0.95, "min_p": 0,
             "chat_template_kwargs": {"enable_thinking": False}, **kw}
@@ -70,7 +70,7 @@ WORDS = ("alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo li
 
 def filler(n_tokens, seed):
     rnd = random.Random(seed)
-    # 每句约 14 token；带编号，避免重复文本被模型当成无意义
+    # ~14 tokens per sentence; numbered so repeated text is not treated as noise by the model
     lines = []
     need = int(n_tokens / 14)
     for i in range(need):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""同一份长文档连问三次，看第二、三次的首 token 是否复用前缀缓存。"""
+"""Ask about the same long document three times and check whether the 2nd and 3rd first-token times reuse the prefix cache."""
 import json, random, sys, time, urllib.request
 U = "http://127.0.0.1:8899/v1/chat/completions"
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 64000

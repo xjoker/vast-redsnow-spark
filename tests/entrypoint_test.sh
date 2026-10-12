@@ -13,7 +13,7 @@ fail() {
 [[ "$(choose_gpu_split "" 112)" == "112" ]] || fail "112 stays 112"
 [[ "$(choose_gpu_split "" 101)" == "112" ]] || fail "101 stays 112"
 [[ "$(choose_gpu_split 110 114)" == "110" ]] || fail "explicit"
-# MemTotal（kB）：151363 旧内核 127535260，146927 新内核 125442396。
+# MemTotal (kB): 151363 old kernel 127535260, 146927 new kernel 125442396.
 [[ -z "$(choose_uma_reserve "" 127535260)" ]] || fail "big machine keeps fork default"
 [[ "$(choose_uma_reserve "" 125442396)" == "6144" ]] || fail "small machine reserve 6144"
 [[ "$(choose_uma_reserve 4096 125442396)" == "4096" ]] || fail "explicit reserve wins"
@@ -58,7 +58,7 @@ rm -f /tmp/redsnow-model-downloaded
   out="$(ensure_model_dir 2>/tmp/redsnow-model.err)" || rc=$?
   [[ "$rc" -eq 2 ]] || exit 1
   [[ -z "$out" ]] || exit 1
-  grep -q "不下载" /tmp/redsnow-model.err || exit 1
+  grep -q "not downloading" /tmp/redsnow-model.err || exit 1
   [[ ! -f /tmp/redsnow-model-downloaded ]] || exit 1
 ) || fail "download gate"
 (
@@ -87,7 +87,7 @@ rm -f /tmp/redsnow-model-downloaded
   rc=0
   ensure_model_dir >/tmp/redsnow-model.out 2>/tmp/redsnow-model.err || rc=$?
   [[ "$rc" -eq 2 ]] || exit 1
-  grep -q "没有挂载存储" /tmp/redsnow-model.err || exit 1
+  grep -q "no mounted storage" /tmp/redsnow-model.err || exit 1
   [[ ! -f /tmp/redsnow-model-downloaded ]] || exit 1
 ) || fail "default path refuses overlay"
 (
@@ -95,7 +95,7 @@ rm -f /tmp/redsnow-model-downloaded
   rc=0
   ensure_model_dir >/dev/null 2>/tmp/redsnow-model.err || rc=$?
   [[ "$rc" -eq 1 ]] || exit 1
-  grep -q "只能是 0 或 1" /tmp/redsnow-model.err || exit 1
+  grep -q "must be 0 or 1" /tmp/redsnow-model.err || exit 1
 ) || fail "bad download flag"
 unset MODEL_DIR MODEL_DOWNLOAD
 
@@ -122,8 +122,8 @@ rm -rf "$root"
 ( unset API_TOKEN; main ) >/tmp/redsnow-token.out 2>/tmp/redsnow-token.err && fail "token should be required"
 grep -q "API_TOKEN" /tmp/redsnow-token.err || fail "token error text"
 
-# EasyTier：桩 easytier-core 把收到的 ET_* 写到文件，桩 easytier-cli 给出虚拟 IP。
-# env -i 隔离宿主环境，避免读到本机残留的 ET_* / EASYTIER_* 变量。
+# EasyTier: the stub easytier-core writes the ET_* it receives to a file; the stub easytier-cli supplies the virtual IP.
+# env -i isolates the host environment so stale local ET_* / EASYTIER_* variables are not picked up.
 et_dir=$(mktemp -d)
 cat >"$et_dir/easytier-core" <<'EOF'
 #!/bin/bash
@@ -134,7 +134,7 @@ cat >"$et_dir/easytier-cli" <<'EOF'
 printf '{"ipv4_addr": "10.144.144.7/24"}\n'
 EOF
 chmod +x "$et_dir/easytier-core" "$et_dir/easytier-cli"
-# 参数：TUN（1 有 tun，0 无）、ET_* 输出文件，其余为环境变量赋值。
+# Arguments: TUN (1 has tun, 0 none), the ET_* output file, the rest are environment assignments.
 run_easytier() {
   local tun="$1" out="$2"
   shift 2
@@ -151,7 +151,7 @@ run_easytier 1 "$et_dir/none.env" 2>"$et_dir/none.err" || rc=$?
 [[ "$rc" -ne 0 ]] || fail "none should not start"
 [[ ! -e "$et_dir/none.env" ]] || fail "none started core"
 [[ "$(grep -c . "$et_dir/none.err")" == 1 ]] || fail "none should log one line"
-grep -q 'EasyTier 未配置' "$et_dir/none.err" || fail "none text"
+grep -q 'EasyTier not configured' "$et_dir/none.err" || fail "none text"
 [[ ! -e "$stale_ip" ]] || fail "stale vip file kept"
 
 rc=0
@@ -190,7 +190,7 @@ has_line "$et_dir/private0.env" 'ET_PRIVATE_MODE=false' || fail "private mode 0 
 vip="$(PATH="$et_dir:$PATH" easytier_vip)" || fail "easytier_vip failed"
 [[ "$vip" == "10.144.144.7" ]] || fail "vip mask stripped: $vip"
 
-# 常驻 watch 后台运行：状态文件决定桩 easytier-cli 输出的虚拟 IP，逐步切换并断言日志和 IP 文件跟着变。
+# The resident watch runs in the background: a state file decides the virtual IP the stub easytier-cli prints; switch it step by step and assert the log and IP file follow.
 watch_dir=$(mktemp -d)
 cat >"$watch_dir/easytier-cli" <<EOF
 #!/bin/bash
@@ -202,7 +202,7 @@ watch_log="$watch_dir/watch.log"
 PATH="$watch_dir:$PATH" EASYTIER_WATCH_INTERVAL=0.1 PROXY_PORT=8898 \
   EASYTIER_IP_FILE="$watch_dir/ip" watch_easytier_vip 2>"$watch_log" &
 watch_pid=$!
-# 轮询等日志出现某行，约 10 秒超时；超时先杀后台进程再失败，避免测试挂住。
+# Poll until a line appears in the log, ~10 s timeout; on timeout kill the background process before failing so the test does not hang.
 wait_log() {
   local i
   for i in $(seq 1 100); do
@@ -213,19 +213,19 @@ wait_log() {
   fail "watch: no '$1'"
 }
 printf '10.144.144.7/24' >"$watch_dir/state"
-wait_log '虚拟 IP  10.144.144.7'
+wait_log 'Virtual IP  10.144.144.7'
 [[ "$(cat "$watch_dir/ip")" == "10.144.144.7" ]] || fail "vip file 7"
 grep -q 'http://10.144.144.7:8898/v1' "$watch_log" || fail "vip banner access"
 printf '10.144.144.8/24' >"$watch_dir/state"
-wait_log '虚拟 IP  10.144.144.8'
+wait_log 'Virtual IP  10.144.144.8'
 [[ "$(cat "$watch_dir/ip")" == "10.144.144.8" ]] || fail "vip file 8"
 : >"$watch_dir/state"
-wait_log '虚拟 IP 丢失'
+wait_log 'virtual IP lost'
 [[ ! -e "$watch_dir/ip" ]] || fail "vip file kept after loss"
 kill "$watch_pid" 2>/dev/null || true
 wait "$watch_pid" 2>/dev/null || true
-[[ "$(grep -c '已入网' "$watch_log")" == 2 ]] || fail "two banners"
-# 启动日志配了 peer 时要列出来。nohup 桩掉，只看日志；watch 也桩掉，避免后台循环。
+[[ "$(grep -c 'EasyTier joined' "$watch_log")" == 2 ]] || fail "two banners"
+# The startup log must list peers when configured. nohup is stubbed to look at the log only; watch is stubbed too to avoid the background loop.
 start_out="$(env -i PATH=/usr/bin:/bin EASYTIER_PEERS='tcp://a:11010,udp://b:11010' "$BASH" -c \
   'source ./entrypoint.sh; nohup() { :; }; watch_easytier_vip() { :; }; start_easytier' 2>&1)" || fail "start_easytier"
 grep -q 'peer: tcp://a:11010,udp://b:11010' <<<"$start_out" || fail "start log lists peers"
@@ -234,7 +234,7 @@ printf '10.144.144.7\n' >"$et_dir/ip"
 conn_out="$(EASYTIER_IP_FILE="$et_dir/ip" PROXY_PORT=8898 CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 \
   TUNNEL_URL_FILE="$et_dir/no-url" connect_lines)"
 grep -q 'EasyTier  http://10.144.144.7:8898/v1' <<<"$conn_out" || fail "connect lines easytier"
-grep -q '并发      1 个请求同时生成' <<<"$conn_out" || fail "connect lines concurrency"
+grep -q 'Slots     1 concurrent request(s)' <<<"$conn_out" || fail "connect lines concurrency"
 
 for bad_peers in 'http://x:1' 'tcp://x' 'tcp://a:1,, udp://b:2'; do
   (
@@ -257,10 +257,10 @@ done
   [[ "$rc" -eq 1 ]] && grep -q 'MAX_ACTIVE_REQUESTS' "$et_dir/max.err"
 ) || fail "max active requests validation"
 (
-  # 私有模式取非法值，让 main 在警告之后立刻退出。
+  # Give private mode an invalid value so main exits right after the warning.
   API_TOKEN=tok MAX_ACTIVE_REQUESTS=2 EASYTIER_PRIVATE_MODE=2
   (main) >/dev/null 2>"$et_dir/slots.err" || true
-  grep -q 'warn: MAX_ACTIVE_REQUESTS=2 配 CACHE_SIZE=262144' "$et_dir/slots.err"
+  grep -q 'warn: MAX_ACTIVE_REQUESTS=2 with CACHE_SIZE=262144' "$et_dir/slots.err"
   CACHE_SIZE=131072
   (main) >/dev/null 2>"$et_dir/slots2.err" || true
   ! grep -q 'warn: MAX_ACTIVE_REQUESTS' "$et_dir/slots2.err"
@@ -514,18 +514,18 @@ rm -rf "$cf_dir"
 serve_out=$(printf '%s\n' \
   '{"request_id":"chatcmpl-d39e","finish_reason":"stop","usage":{"prompt_tokens":188,"completion_tokens":88,"total_tokens":276,"decode_tok_s":31.09,"draft_accept":0.7571428571428571,"time_prefill":0.9676179885864258,"time_generate":2.8301398754119873,"time_enqueued":0.001661539077758789}}' \
   | format_serve_output 2>&1)
-grep -q '输入 188 tok' <<<"$serve_out" || fail "usage prompt tokens"
-grep -q '解码 31.1 tok/s' <<<"$serve_out" || fail "usage decode rate"
-grep -q 'MTP 接受 76%' <<<"$serve_out" || fail "usage mtp accept"
-grep -q '预填 0.97 s（194 tok/s）' <<<"$serve_out" || fail "usage prefill rate"
+grep -q 'in 188 tok' <<<"$serve_out" || fail "usage prompt tokens"
+grep -q 'decode 31.1 tok/s' <<<"$serve_out" || fail "usage decode rate"
+grep -q 'MTP accept 76%' <<<"$serve_out" || fail "usage mtp accept"
+grep -q 'prefill 0.97 s (194 tok/s)' <<<"$serve_out" || fail "usage prefill rate"
 
 mixed_out=$(printf '%s\n' \
   ' -- Mixed-K experts in model.language_model.layers.31.mlp: dense per-expert path' \
   ' -- Mixed-K experts in model.language_model.layers.30.mlp: dense per-expert path' \
   ' -- Mixed-K fused groups in model.language_model.layers.30.mlp' \
   | format_serve_output 2>&1)
-if grep -q 'layers.31\|第 31 层' <<<"$mixed_out"; then fail "layer 31 should be dropped"; fi
-grep -q '加载权重 第 30 层' <<<"$mixed_out" || fail "layer 30 progress"
+if grep -q 'layers.31\|layer 31' <<<"$mixed_out"; then fail "layer 31 should be dropped"; fi
+grep -q 'loading weights layer 30' <<<"$mixed_out" || fail "layer 30 progress"
 if grep -q 'Mixed-K' <<<"$mixed_out"; then fail "mixed-k noise leaked"; fi
 health_out=$(printf '%s\n' '127.0.0.1 "GET /health HTTP/1.1" 200 -' '127.0.0.1 "GET /v1/models HTTP/1.1" 200 -' \
   | format_serve_output 2>&1)
@@ -538,14 +538,14 @@ ready_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
   | (API_TOKEN=secret-xyz CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 VISION=1 CF_TUNNEL=1 CF_TUNNEL_TOKEN= \
      PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
      PROXY_PORT=8898 TUNNEL_URL_FILE="$tunnel_dir/url" format_serve_output) 2>&1)
-grep -q '模型就绪：接入信息' <<<"$ready_out" || fail "ready banner"
+grep -q 'Model ready: connection info' <<<"$ready_out" || fail "ready banner"
 grep -q 'Base URL  https://a-b.trycloudflare.com/v1' <<<"$ready_out" || fail "ready base url"
-grep -q '备用 URL  http://1.2.3.4:33526/v1' <<<"$ready_out" || fail "ready vast backup"
-grep -q '模型      RED-SNOW-5.3-FLASH-EXL3-2.49' <<<"$ready_out" || fail "ready model"
-grep -q '上下文    262144 tok' <<<"$ready_out" || fail "ready context"
+grep -q 'Fallback  http://1.2.3.4:33526/v1' <<<"$ready_out" || fail "ready vast backup"
+grep -q 'Model     RED-SNOW-5.3-FLASH-EXL3-2.49' <<<"$ready_out" || fail "ready model"
+grep -q 'Context   262144 tok' <<<"$ready_out" || fail "ready context"
 grep -q '229376' <<<"$ready_out" || fail "ready max_tokens threshold"
-grep -q '必须 stream: true' <<<"$ready_out" || fail "ready tunnel stream"
-grep -q '图片' <<<"$ready_out" || fail "ready vision"
+grep -q 'stream: true is required' <<<"$ready_out" || fail "ready tunnel stream"
+grep -q 'images' <<<"$ready_out" || fail "ready vision"
 grep -q 'curl -N https://a-b.trycloudflare.com/v1/chat/completions' <<<"$ready_out" || fail "ready curl example"
 grep -q 'Authorization: Bearer <API_TOKEN>' <<<"$ready_out" || fail "ready auth line"
 if grep -q 'secret-xyz' <<<"$ready_out"; then fail "api token leaked into log"; fi
@@ -557,13 +557,13 @@ vast_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
      PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
      PROXY_PORT=8898 TUNNEL_URL_FILE="$vast_dir/none" format_serve_output) 2>&1)
 grep -q 'Base URL  http://1.2.3.4:33526/v1' <<<"$vast_out" || fail "vast base url"
-grep -q '推荐 stream: true' <<<"$vast_out" || fail "vast stream hint"
-if grep -q '备用 URL' <<<"$vast_out"; then fail "vast-only should have no backup"; fi
+grep -q 'stream: true recommended' <<<"$vast_out" || fail "vast stream hint"
+if grep -q 'Fallback' <<<"$vast_out"; then fail "vast-only should have no backup"; fi
 vision_out=$(printf '%s\n' 'Native API listening 127.0.0.1:8899; max_active=1' \
   | (API_TOKEN=secret-xyz CACHE_SIZE=262144 MAX_ACTIVE_REQUESTS=1 VISION=0 CF_TUNNEL=0 \
      PUBLIC_IPADDR=1.2.3.4 VAST_TCP_PORT_8898=33526 \
      PROXY_PORT=8898 TUNNEL_URL_FILE="$vast_dir/none" format_serve_output) 2>&1)
-if grep -q '图片' <<<"$vision_out"; then fail "vision off should not advertise images"; fi
+if grep -q 'images' <<<"$vision_out"; then fail "vision off should not advertise images"; fi
 rm -rf "$vast_dir"
 
 [[ "$(grep -c 'RED-SNOW-5.3-FLASH-EXL3-2.49' entrypoint.sh)" == 1 ]] || fail "served model name defined once"
@@ -579,9 +579,9 @@ printf 'MemTotal:       127543204 kB\nMemAvailable:    9437184 kB\n' >"$stub_dir
 metrics=$(PATH="$stub_dir:$PATH" MEMINFO="$stub_dir/meminfo" SERVE_PORT=1 \
   TUNNEL_URL_FILE="$stub_dir/no-url" metrics_line 2>/dev/null)
 grep -q 'GPU 95%' <<<"$metrics" || fail "metrics gpu"
-grep -q '内存可用' <<<"$metrics" || fail "metrics memory"
-grep -q '推理未就绪' <<<"$metrics" || fail "metrics not ready"
-if grep -q '公网' <<<"$metrics"; then fail "metrics without url file"; fi
+grep -q 'mem avail' <<<"$metrics" || fail "metrics memory"
+grep -q 'inference not ready' <<<"$metrics" || fail "metrics not ready"
+if grep -q 'public' <<<"$metrics"; then fail "metrics without url file"; fi
 rm -rf "$stub_dir"
 
 (

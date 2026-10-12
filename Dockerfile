@@ -1,4 +1,4 @@
-# GPUtw DGX Spark（GB10，linux/arm64，sm_121）。权重不进镜像。
+# GPUtw DGX Spark (GB10, linux/arm64, sm_121). Weights are not baked into the image.
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
 ARG KERNELS_IMAGE=ghcr.io/xjoker/redsnow-kernels:aa86ccd701004bef36b54a8931178975a7143edb
 FROM ${KERNELS_IMAGE} AS kernels
@@ -54,7 +54,7 @@ RUN curl -fsSL -o /tmp/easytier.zip \
  && easytier-core --version \
  && easytier-cli --version
 
-# GB10 统一内存下 nvidia-smi 的显存是 N/A。nv-monitor 按 MemAvailable 和页缓存分开算，另有 GPU 功耗、温度、时钟；-n -l 可无界面写 CSV。
+# On GB10 unified memory nvidia-smi reports memory as N/A. nv-monitor splits MemAvailable and page cache, and also reports GPU power, temperature and clocks; -n -l writes CSV without a UI.
 COPY licenses/nv-monitor-v1.14.0-LICENSE /usr/share/licenses/nv-monitor/LICENSE
 RUN curl -fsSL -o /usr/local/bin/nv-monitor \
       "https://github.com/wentbackward/nv-monitor/releases/download/v${NV_MONITOR_VERSION}/nv-monitor-linux-arm64" \
@@ -62,7 +62,7 @@ RUN curl -fsSL -o /usr/local/bin/nv-monitor \
  && chmod 755 /usr/local/bin/nv-monitor \
  && nv-monitor -v
 
-# 用 musl 静态包，不依赖基础镜像的 glibc 版本。发行包是 tar.gz，sha256 校验的是压缩包本身。
+# Static musl build, independent of the base image's glibc. The release is a tar.gz and the sha256 covers the archive itself.
 COPY licenses/dgxtop-v0.2.5-LICENSE /usr/share/licenses/dgxtop/LICENSE
 RUN curl -fsSL -o /tmp/dgxtop.tar.gz \
       "https://github.com/DennySORA/dgxtop/releases/download/v${DGXTOP_VERSION}/dgxtop-aarch64-unknown-linux-musl.tar.gz" \
@@ -72,7 +72,7 @@ RUN curl -fsSL -o /tmp/dgxtop.tar.gz \
  && chmod 755 /usr/local/bin/dgxtop \
  && dgxtop --version
 
-# cloudflared 把认证代理暴露到公网，入口只指向 PROXY_PORT。Apache-2.0。
+# cloudflared exposes the auth proxy publicly; its ingress points only at PROXY_PORT. Apache-2.0.
 COPY licenses/cloudflared-2026.9.3-LICENSE /usr/share/licenses/cloudflared/LICENSE
 RUN curl -fsSL -o /usr/local/bin/cloudflared \
       "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-arm64" \
@@ -92,8 +92,8 @@ RUN torch_before="$(python3 -c 'import torch; print(torch.__version__)')" \
  && rm -rf /tmp/wheels \
  && python3 -c "import exllamav3, exllamav3_ext, transformers; print(transformers.__version__)"
 
-# server.patch：图片输入、developer 角色、JSON response_format、强制 tool_choice、reasoning_effort 开思考、
-# generation_config 采样默认值、OpenAI 标准响应字段、单个任务失败（含 OOM）不拖垮生成线程。只对钉死的 SERVER_REF 生效，换提交要重做补丁。
+# server.patch: image input, developer role, JSON response_format, forced tool_choice, reasoning_effort enabling thinking,
+# generation_config sampling defaults, standard OpenAI response fields, and a single failed job (including OOM) no longer kills the generation thread. Only applies to the pinned SERVER_REF; a new commit needs a new patch.
 COPY server.patch /tmp/server.patch
 RUN git clone https://github.com/Weschera/RED-SNOW-5.3-Flash-2.49bpw-1x-DGX-Spark.git /tmp/redsnow \
  && git -C /tmp/redsnow checkout --detach "${SERVER_REF}" \

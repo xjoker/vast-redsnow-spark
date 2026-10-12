@@ -1,4 +1,4 @@
-# exllamav3 的 sm_121 内核。应用镜像只拷贝 wheel，不在这里以外编译。
+# exllamav3 sm_121 kernels. The app image only copies the wheel and compiles nothing outside this file.
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3@sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
 ARG EXL3_REF=aa86ccd701004bef36b54a8931178975a7143edb
 
@@ -24,7 +24,7 @@ from pathlib import Path
 
 wheels = glob.glob("/out/exllamav3-*.whl")
 if len(wheels) != 1:
-    print(f"期望 1 个 wheel，实际 {wheels}", file=sys.stderr)
+    print(f"expected 1 wheel, got {wheels}", file=sys.stderr)
     sys.exit(1)
 with zipfile.ZipFile(wheels[0]) as archive:
     names = [
@@ -33,7 +33,7 @@ with zipfile.ZipFile(wheels[0]) as archive:
         if Path(name).name.startswith("exllamav3_ext") and name.endswith(".so")
     ]
     if len(names) != 1:
-        print(f"期望 1 个 exllamav3_ext so，实际 {names}", file=sys.stderr)
+        print(f"expected 1 exllamav3_ext so, got {names}", file=sys.stderr)
         sys.exit(1)
     blob = archive.read(names[0])
 so = Path("/tmp/exllamav3_ext.so")
@@ -50,7 +50,7 @@ if dump.returncode != 0:
     sys.exit(dump.returncode)
 archs = sorted(set(re.findall(r"sm_\d+[a-z]*", dump.stdout + dump.stderr)))
 if archs != ["sm_121"]:
-    print(f"ELF 架构不是只有 sm_121，实际 {archs}", file=sys.stderr)
+    print(f"ELF arch is not sm_121 only, got {archs}", file=sys.stderr)
     sys.exit(1)
 PY
 

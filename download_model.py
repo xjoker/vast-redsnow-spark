@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""补齐本地模型目录。完整则不动。缺的分片多线程下载，中断后接着传。"""
+"""Complete the local model directory. Leave it alone if already complete. Missing shards are downloaded in parallel and resume after interruption."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ FATAL_ERRNO = {errno.ENOSPC, errno.EROFS, errno.EACCES, errno.EPERM}
 
 
 class ModelIndexError(Exception):
-    """模型索引不可读，或里面的文件名不能用。"""
+    """The model index is unreadable, or a file name in it is unusable."""
 
 
 def configure_logging() -> None:
@@ -40,7 +40,7 @@ def configure_logging() -> None:
         stream=sys.stderr,
     )
     logging.Formatter.converter = time.gmtime
-    # huggingface_hub 走 httpx，每个 HEAD/GET 都打一条 INFO，几十个文件就刷满启动日志。
+    # huggingface_hub uses httpx and logs an INFO line per HEAD/GET; with dozens of files that floods the startup log.
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
@@ -48,14 +48,14 @@ def parse_workers(raw: str) -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise SystemExit(f"MODEL_DOWNLOAD_WORKERS 不是整数: {raw}") from exc
+        raise SystemExit(f"MODEL_DOWNLOAD_WORKERS is not an integer: {raw}") from exc
     if value < 1:
-        raise SystemExit(f"MODEL_DOWNLOAD_WORKERS 必须为正: {value}")
+        raise SystemExit(f"MODEL_DOWNLOAD_WORKERS must be positive: {value}")
     return value
 
 
 def prepare_hub_env(dest: Path) -> Path:
-    """分片缓存跟模型放在同一块盘上，容器重建后还能接着传。"""
+    """The shard cache lives on the same disk as the model so downloads resume after the container is recreated."""
     cache = dest / ".hf-cache"
     cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HOME", str(cache))
@@ -63,7 +63,7 @@ def prepare_hub_env(dest: Path) -> Path:
     os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
     if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER"):
-        LOG.warning("HF_HUB_ENABLE_HF_TRANSFER 已废弃，Xet 会忽略它。不要靠它加速。")
+        LOG.warning("HF_HUB_ENABLE_HF_TRANSFER is deprecated and Xet ignores it. Do not rely on it for speed.")
     return cache
 
 
@@ -84,7 +84,7 @@ def retryable(exc: BaseException) -> bool:
 
 
 def discard_orphan_incomplete(dest: Path) -> None:
-    """临时文件名每次下载都变，留着也不能续传。分片缓存 .hf-cache 不动。"""
+    """Temporary file names change on every download, so keeping them cannot resume anything. The shard cache .hf-cache is left alone."""
     removed = 0
     nbytes = 0
     for dirpath, dirnames, filenames in os.walk(dest):
@@ -98,7 +98,7 @@ def discard_orphan_incomplete(dest: Path) -> None:
             removed += 1
     if removed:
         LOG.info(
-            "清掉 %s 个无法续传的临时文件，共 %s 字节。已完成分片和 .hf-cache 保留。",
+            "removed %s temporary files that cannot be resumed, %s bytes total. Completed shards and .hf-cache are kept.",
             removed,
             nbytes,
         )
@@ -112,7 +112,7 @@ def missing_shards(dest: Path) -> list[str]:
         payload = json.loads(index_path.read_text(encoding="utf-8"))
         names = payload["weight_map"].values()
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, AttributeError) as exc:
-        raise ModelIndexError(f"模型索引无法读取: {index_path}: {exc}") from exc
+        raise ModelIndexError(f"model index unreadable: {index_path}: {exc}") from exc
     missing: list[str] = []
     seen: list[str] = []
     for name in names:
@@ -122,14 +122,14 @@ def missing_shards(dest: Path) -> list[str]:
             or Path(name).is_absolute()
             or ".." in Path(name).parts
         ):
-            raise ModelIndexError(f"模型索引里的文件名无效: {name!r}")
+            raise ModelIndexError(f"invalid file name in model index: {name!r}")
         if name in seen:
             continue
         seen.append(name)
         if not (dest / name).is_file():
             missing.append(name)
     if not seen:
-        raise ModelIndexError(f"模型索引没有权重文件: {index_path}")
+        raise ModelIndexError(f"model index has no weight files: {index_path}")
     return missing
 
 
@@ -137,7 +137,7 @@ def is_complete(dest: Path) -> bool:
     try:
         return missing_shards(dest) == []
     except ModelIndexError:
-        LOG.exception("模型索引无法读取: %s", dest)
+        LOG.exception("model index unreadable: %s", dest)
         return False
 
 
@@ -154,7 +154,7 @@ def run_download(
     dest.mkdir(parents=True, exist_ok=True)
     cache = prepare_hub_env(dest)
     LOG.info(
-        "下载 repo=%s revision=%s dest=%s workers=%s 缓存=%s 高速=%s",
+        "download repo=%s revision=%s dest=%s workers=%s cache=%s fast=%s",
         repo_id,
         revision,
         dest,
@@ -162,17 +162,17 @@ def run_download(
         cache,
         os.environ.get("HF_XET_HIGH_PERFORMANCE"),
     )
-    LOG.info("已完成的分片会跳过。未完成的块留在缓存里，中断后继续，不从头下载。")
+    LOG.info("Completed shards are skipped. Unfinished chunks stay in the cache and resume after an interruption instead of restarting.")
     last_error: BaseException | None = None
     for attempt in range(1, attempts + 1):
         discard_orphan_incomplete(dest)
         try:
             missing = missing_shards(dest)
         except ModelIndexError:
-            LOG.exception("模型索引无法读取，本轮仍会下载: %s", dest)
+            LOG.exception("model index unreadable, downloading anyway this round: %s", dest)
             missing = []
         if missing:
-            LOG.info("第 %s/%s 轮，还缺 %s 个文件", attempt, attempts, len(missing))
+            LOG.info("round %s/%s, %s files still missing", attempt, attempts, len(missing))
         try:
             snapshot(
                 repo_id=repo_id,
@@ -186,7 +186,7 @@ def run_download(
             last_error = exc
             if not retryable(exc) or attempt == attempts:
                 LOG.exception(
-                    "下载失败 repo=%s revision=%s dest=%s workers=%s attempt=%s",
+                    "download failed repo=%s revision=%s dest=%s workers=%s attempt=%s",
                     repo_id,
                     revision,
                     dest,
@@ -196,7 +196,7 @@ def run_download(
                 raise SystemExit(1) from None
             delay = BACKOFF_SECONDS[min(attempt - 1, len(BACKOFF_SECONDS) - 1)]
             LOG.warning(
-                "下载中断，保留已完成分片和缓存，%s 秒后继续。attempt=%s/%s error=%s",
+                "download interrupted, keeping completed shards and cache, retrying in %s s. attempt=%s/%s error=%s",
                 delay,
                 attempt,
                 attempts,
@@ -207,25 +207,25 @@ def run_download(
         try:
             still = missing_shards(dest)
         except ModelIndexError:
-            LOG.exception("下载结束但模型索引仍不可读: %s", dest)
+            LOG.exception("download finished but model index is still unreadable: %s", dest)
             raise SystemExit(1) from None
         if not still:
-            LOG.info("下载结束 repo=%s revision=%s dest=%s", repo_id, revision, dest)
+            LOG.info("download finished repo=%s revision=%s dest=%s", repo_id, revision, dest)
             return
-        last_error = RuntimeError("仍缺少 " + ", ".join(still))
+        last_error = RuntimeError("still missing " + ", ".join(still))
         if attempt == attempts:
-            LOG.error("下载结束仍缺少 %s", ", ".join(still))
+            LOG.error("download finished but still missing %s", ", ".join(still))
             raise SystemExit(1)
         delay = BACKOFF_SECONDS[min(attempt - 1, len(BACKOFF_SECONDS) - 1)]
-        LOG.warning("本轮后仍缺 %s 个文件，%s 秒后继续。", len(still), delay)
+        LOG.warning("%s files still missing after this round, retrying in %s s.", len(still), delay)
         sleep(delay)
-    LOG.error("下载未完成: %s", last_error)
+    LOG.error("download incomplete: %s", last_error)
     raise SystemExit(1)
 
 
 def main() -> None:
     configure_logging()
-    parser = argparse.ArgumentParser(description="检查或下载 RED-SNOW 权重")
+    parser = argparse.ArgumentParser(description="Check or download RED-SNOW weights")
     parser.add_argument("--check", metavar="DIR")
     parser.add_argument("--repo")
     parser.add_argument("--revision")
@@ -235,14 +235,14 @@ def main() -> None:
     if args.check:
         raise SystemExit(0 if is_complete(Path(args.check)) else 1)
     if not args.repo or not args.revision or not args.dest:
-        raise SystemExit("下载需要 --repo --revision --dest")
+        raise SystemExit("download needs --repo --revision --dest")
     workers = parse_workers(args.workers)
     dest = Path(args.dest)
     prepare_hub_env(dest)
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
-        LOG.exception("没有 huggingface_hub，无法下载模型")
+        LOG.exception("huggingface_hub is missing, cannot download the model")
         raise SystemExit(1) from None
     run_download(args.repo, args.revision, dest, workers, snapshot_download)
 

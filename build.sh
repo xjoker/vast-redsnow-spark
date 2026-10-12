@@ -1,5 +1,5 @@
 #!/bin/bash
-# 只构建 GPUtw DGX Spark 用的 linux/arm64 镜像。不推送。
+# Build only the linux/arm64 image for GPUtw DGX Spark. Does not push.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -10,7 +10,7 @@ if [[ "$os" == "Darwin" && "$arch" == "arm64" ]]; then
 elif [[ "$arch" == "aarch64" ]]; then
   :
 elif [[ "${ALLOW_EMULATED_BUILD:-}" != "1" ]]; then
-  echo "只在 arm64 上构建。当前是 ${os}/${arch}。模拟构建要显式设置 ALLOW_EMULATED_BUILD=1。" >&2
+  echo "Builds only on arm64. Current host is ${os}/${arch}. Set ALLOW_EMULATED_BUILD=1 explicitly for an emulated build." >&2
   exit 1
 fi
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# 依次跑 A / A2 / B。每项前后记录 memory.events；每项后探活，服务不通就停止后续测试。
+# Run A / A2 / B in turn. Record memory.events before and after each; probe liveness after each and stop if the service is down.
 RES=/root/mem_results.jsonl
 EV=/root/mem_events.log
 : > $RES

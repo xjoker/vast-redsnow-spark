@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从同一个发布包安装 easytier-core 和 easytier-cli。不走会装成 latest 的 install.sh。"""
+"""Install easytier-core and easytier-cli from the same release package. Does not use install.sh, which would install latest."""
 import os
 import sys
 import zipfile

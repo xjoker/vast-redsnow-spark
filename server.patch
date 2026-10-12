@@ -1,5 +1,5 @@
 diff --git a/server/protocol.py b/server/protocol.py
-index e8dd153..2f9f79e 100644
+index e8dd153..e3ea61a 100644
 --- a/server/protocol.py
 +++ b/server/protocol.py
 @@ -164,16 +164,33 @@ def normalize_messages(messages):
@@ -7,7 +7,7 @@ index e8dd153..2f9f79e 100644
          msg = copy.deepcopy(original)
          role = msg.get("role")
 +        if role == "developer":
-+            # OpenAI 新版把 system 改名为 developer；模板只认 system。
++            # Newer OpenAI renames system to developer; the template only knows system.
 +            role = msg["role"] = "system"
          if role not in ("system", "user", "assistant", "tool"):
              raise APIError("Unsupported message role")
@@ -28,7 +28,7 @@ index e8dd153..2f9f79e 100644
 +                    url = url.get("url") if isinstance(url, dict) else url
 +                    if not isinstance(url, str) or not url:
 +                        raise APIError("image_url.url must be a nonempty string")
-+                    # 模板把 image/image_url 渲染成 <|begin_of_image|><|image|><|end_of_image|>，服务层按顺序换成视觉嵌入。
++                    # The template renders image/image_url as <|begin_of_image|><|image|><|end_of_image|>; the server layer swaps them for vision embeddings in order.
 +                    parts.append({"type": "image_url", "image_url": {"url": url}})
 +                else:
 +                    raise APIError("Content parts must be text, or image_url in user/tool messages")
@@ -49,7 +49,7 @@ index e8dd153..2f9f79e 100644
 +    fmt_type = "text" if fmt is None else (fmt.get("type") if isinstance(fmt, dict) else None)
 +    if fmt_type not in ("text", "json_object", "json_schema"):
 +        raise APIError("response_format.type must be text, json_object or json_schema")
-+    # 没有受限解码库，JSON 模式只能靠系统指令引导，不保证一定合法。
++    # There is no constrained-decoding library; JSON mode relies on a system instruction and is not guaranteed to be valid.
 +    format_instruction = ""
 +    if fmt_type == "json_object":
 +        format_instruction = "Respond with a single valid JSON object only, with no surrounding text or code fences."
@@ -75,7 +75,7 @@ index e8dd153..2f9f79e 100644
              raise APIError(f"{key} must be boolean")
      if "reasoning_effort" in body:
          kwargs["reasoning_effort"] = body["reasoning_effort"]
-+        # 模板只认 enable_thinking。按 OpenAI 语义，给了思考档位就开思考，none/minimal 除外。
++        # The template only knows enable_thinking. Following OpenAI semantics, any reasoning effort turns thinking on, except none/minimal.
 +        if "enable_thinking" not in kwargs and isinstance(body["reasoning_effort"], str):
 +            kwargs["enable_thinking"] = body["reasoning_effort"] not in ("none", "minimal")
      max_tokens = body.get("max_completion_tokens")
@@ -97,7 +97,7 @@ index e8dd153..2f9f79e 100644
 +            value = defaults.get(key)
          return default if value is None else value
      temp = pick("temperature", 0.0)
-+    # 上游公布的采样是 0.7 / 0.95 / min_p 0；用到模型默认值时 min_p 也按 0。
++    # Upstream publishes sampling 0.7 / 0.95 / min_p 0; when model defaults are used, min_p is 0 too.
 +    min_p_default = 0.0 if temp <= 0 or "temperature" in defaults else 0.08
      return dict(temperature=temp, top_p=pick("top_p", 1.0),
                  top_k=pick("top_k", 1 if temp <= 0 else 0),
@@ -107,19 +107,19 @@ index e8dd153..2f9f79e 100644
                  freq_p=pick("frequency_penalty", 0.0), rep_sustain_range=1024,
                  rep_decay_range=1024, temp_last=True, adaptive_target=1.0, adaptive_decay=0.9)
 diff --git a/server/serve_glm.py b/server/serve_glm.py
-index 4945f6d..500d3c9 100755
+index 4945f6d..8ea904d 100755
 --- a/server/serve_glm.py
 +++ b/server/serve_glm.py
 @@ -34,6 +34,43 @@ from protocol import APIError, dumps, loads, normalize_request, sampling_options
  from glm_protocol import GlmOutputParser as OutputParser, render_prompt, token_budget
  from worker import GenerationWorker
  
-+# 模型自带 chat_template.jinja 为每个 image/image_url 部件输出的占位串。
++# Placeholder string the model's own chat_template.jinja emits for each image/image_url part.
 +IMAGE_MARKER = "<|begin_of_image|><|image|><|end_of_image|>"
 +
 +
 +def load_image(url, max_bytes):
-+    """data: URI 或 http(s) URL -> PIL RGB 图。其他协议拒绝。"""
++    """data: URI or http(s) URL -> PIL RGB image. Other schemes are rejected."""
 +    import base64
 +    import io
 +    import urllib.request
@@ -171,7 +171,7 @@ index 4945f6d..500d3c9 100755
          with self.prompt_lock:
              prompt, thinking = render_prompt(self.hf, request)
 -            ids = self.tokenizer.encode(prompt, add_bos=False, encode_special_tokens=True)
-+            # tool_choice=required/指定函数：只靠系统指令模型会不调用。预填调用开头，模型只能接着写参数。
++            # tool_choice=required/named function: a system instruction alone may leave the model not calling a tool. Prefill the start of the call so the model can only continue with the arguments.
 +            forced = ""
 +            if request.choice == "required" and request.specs:
 +                forced = "<tool_call>" + (next(iter(request.specs)) if len(request.specs) == 1 else "")
@@ -295,7 +295,7 @@ index 4945f6d..500d3c9 100755
      print(f"Native API listening {args.host}:{args.port}; max_active={args.max_active_requests}", flush=True)
      try:
 diff --git a/server/worker.py b/server/worker.py
-index 56fcb9b..b16fae8 100644
+index 56fcb9b..e0bc5cd 100644
 --- a/server/worker.py
 +++ b/server/worker.py
 @@ -5,7 +5,7 @@ import contextlib
@@ -338,7 +338,7 @@ index 56fcb9b..b16fae8 100644
                  self.capacity.release()
  
 +    def _counted(self, error):
-+        # serve_glm 据此跳过已计数的错误，避免同一个错误记两次。
++        # serve_glm uses this to skip errors already counted, so one error is not counted twice.
 +        self.record_error(error.code)
 +        error.counted = True
 +        return error
@@ -481,7 +481,7 @@ index 56fcb9b..b16fae8 100644
 +            now = event.get("curr_progress", 0)
 +            last = progress.get(ticket.identifier)
 +            progress[ticket.identifier] = now
-+            # 首条事件含前缀缓存命中的部分，只当基线，否则会把缓存命中算成预填速度。
++            # The first event includes the prefix-cache hit and is used only as a baseline; otherwise cache hits would be counted as prefill speed.
 +            if last is not None and now > last:
 +                with self.stats_lock:
 +                    self.counters["prefill_tokens"] += now - last

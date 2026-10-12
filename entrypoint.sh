@@ -1,6 +1,6 @@
 #!/bin/bash
-# 容器内直接启动推理。推理只听 127.0.0.1。认证代理听 0.0.0.0，必须带 API_TOKEN。
-# EasyTier 留空则用服务器 IP 和认证端口。
+# Start inference directly inside the container. Inference listens on 127.0.0.1 only; the auth proxy listens on 0.0.0.0 and requires API_TOKEN.
+# If EasyTier is left empty, use the server IP and the auth port.
 set -euo pipefail
 
 log() {
@@ -17,7 +17,7 @@ have_tun() {
 }
 
 MODEL_NAME="RED-SNOW-5.3-FLASH-EXL3-SAGE-2.49bpw"
-# 唯一模型目录。挂盘时把存储挂到 /models，文件就落在这一层。
+# The single model directory. When storage is mounted, mount it at /models and the files land here.
 MODEL_LOCK="/models/${MODEL_NAME}"
 
 locked_model_dir() {
@@ -32,7 +32,7 @@ model_is_complete() {
   python3 "$DOWNLOAD_MODEL_PY" --check "$1" >/dev/null
 }
 
-# 默认目录必须是挂载点，避免把约 97GiB 写进容器层。MODEL_DIR 由调用方指定位置。
+# The default directory must be a mount point so ~97 GiB is not written into the container layer. MODEL_DIR sets the location explicitly.
 weights_mount_ok() {
   local dest="$1"
   [[ "$dest" == "$MODEL_LOCK" ]] || return 0
@@ -40,41 +40,41 @@ weights_mount_ok() {
   awk -v p="/models" '$2 == p { found = 1 } END { exit found ? 0 : 1 }' /proc/mounts
 }
 
-# 0：目录可加载。2：不下载，调用方保持 sshd 和认证代理。1：配置或下载失败。
+# 0: directory is loadable. 2: not downloading; caller keeps sshd and the auth proxy. 1: config or download failed.
 ensure_model_dir() {
   local dest
   case "${MODEL_DOWNLOAD:-1}" in
     0 | 1) ;;
     *)
-      log "MODEL_DOWNLOAD 只能是 0 或 1，当前是 ${MODEL_DOWNLOAD}"
+      log "MODEL_DOWNLOAD must be 0 or 1, got ${MODEL_DOWNLOAD}"
       return 1
       ;;
   esac
   dest="$(locked_model_dir)"
   if model_is_complete "$dest"; then
-    log "使用已有模型 ${dest}"
+    log "using existing model ${dest}"
     printf '%s\n' "$dest"
     return 0
   fi
   if [[ "${MODEL_DOWNLOAD:-1}" == "0" ]]; then
-    log "MODEL_DOWNLOAD=0，目录没有完整模型，不下载: ${dest}"
+    log "MODEL_DOWNLOAD=0, directory has no complete model, not downloading: ${dest}"
     return 2
   fi
   if ! weights_mount_ok "$dest"; then
-    log "模型目录 ${dest} 没有挂载存储，不下载。把盘挂到 /models，或设置 MODEL_DIR。本次跳过推理。"
+    log "model directory ${dest} has no mounted storage, not downloading. Mount a disk at /models or set MODEL_DIR. Skipping inference this time."
     return 2
   fi
-  log "目录没有完整模型，开始下载 repo=${MODEL_REPO} revision=${MODEL_REVISION} 目录=${dest} 线程=${MODEL_DOWNLOAD_WORKERS}"
+  log "directory has no complete model, downloading repo=${MODEL_REPO} revision=${MODEL_REVISION} dir=${dest} workers=${MODEL_DOWNLOAD_WORKERS}"
   python3 "$DOWNLOAD_MODEL_PY" \
     --repo "$MODEL_REPO" \
     --revision "$MODEL_REVISION" \
     --dest "$dest" \
     --workers "$MODEL_DOWNLOAD_WORKERS" >&2
   if ! model_is_complete "$dest"; then
-    log "下载结束但模型仍不完整: ${dest}"
+    log "download finished but model is still incomplete: ${dest}"
     return 1
   fi
-  log "模型下载完成 ${dest}"
+  log "model download complete ${dest}"
   printf '%s\n' "$dest"
 }
 
@@ -90,7 +90,7 @@ install_ssh_pubkey() {
   fi
 }
 
-# 平台重建容器时把公钥写成宿主 uid 属主，sshd StrictModes 会拒绝 root 公钥登录，所以启动时改回来。
+# When the platform recreates the container it writes the public key owned by the host uid, which makes sshd StrictModes reject root key logins, so chown it back at startup.
 fix_root_ssh_perms() {
   local dir="${1:-/root/.ssh}" path owner
   [[ -d "$dir" ]] || return 0
@@ -100,7 +100,7 @@ fix_root_ssh_perms() {
       owner="$(stat -c '%u:%g' "$path")"
       if [[ "$owner" != "0:0" ]]; then
         chown root:root "$path"
-        log "${path} 属主是 ${owner}，已改回 root。平台注入公钥时用了宿主 uid，sshd StrictModes 会拒绝。"
+        log "${path} is owned by ${owner}, changed back to root. The platform injected the key with a host uid, which sshd StrictModes rejects."
       fi
     fi
   done
@@ -155,7 +155,7 @@ tunnel_targets() {
     [[ -n "$trimmed" ]] || continue
     count=$((count + 1))
     if ((count > 16)); then
-      log "SSH_TUNNELS 超过 16 个目标"
+      log "SSH_TUNNELS has more than 16 targets"
       return 1
     fi
     printf '%s\n' "$trimmed"
@@ -186,32 +186,32 @@ render_tunnel_match() {
   printf '# redsnow-tunnel-end\n'
 }
 
-# 未配置返回 1。用户名、密码或转发目标无效返回 2。配置文本里没有密码。
+# Returns 1 if not configured. Returns 2 if the user name, password or forward target is invalid. The config text contains no password.
 tunnel_sshd_block() {
   local password="${SSH_PASSWORD:-}" pubkey="${SSH_USER_PUBLIC_KEY:-}"
   if [[ -z "$password" && -z "$pubkey" ]]; then
     if [[ -n "${SSH_USER:-}" || -n "${SSH_TUNNELS:-}" ]]; then
-      log "warn: 要建隧道用户，还要填 SSH_PASSWORD 或 SSH_USER_PUBLIC_KEY。"
+      log "warn: creating the tunnel user also needs SSH_PASSWORD or SSH_USER_PUBLIC_KEY."
     fi
     return 1
   fi
   local user="${SSH_USER:-tunnel}"
   if ! valid_ssh_user "$user"; then
-    log "SSH_USER 无效: ${user}。小写字母开头，不能是 root。"
+    log "invalid SSH_USER: ${user}. Must start with a lowercase letter and cannot be root."
     return 2
   fi
   if [[ "$password" == *$'\n'* || "$password" == *$'\r'* ]]; then
-    log "SSH_PASSWORD 不能包含换行"
+    log "SSH_PASSWORD cannot contain newlines"
     return 2
   fi
   if [[ -n "$password" && ${#password} -lt 12 ]]; then
-    log "warn: SSH_PASSWORD 短于 12 字符。22 端口在租用平台上常常是公网。"
+    log "warn: SSH_PASSWORD is shorter than 12 characters. Port 22 is often public on rental platforms."
   fi
   local targets_text="" targets_rc=0 line
   targets_text="$(tunnel_targets "${SSH_TUNNELS:-}" "${PROXY_PORT:-8898}")" || targets_rc=$?
   if [[ "$targets_rc" -ne 0 || -z "$targets_text" ]]; then
     if [[ -z "$targets_text" ]]; then
-      log "SSH_TUNNELS 是空的"
+      log "SSH_TUNNELS is empty"
     fi
     return 2
   fi
@@ -219,7 +219,7 @@ tunnel_sshd_block() {
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     if ! valid_permit_open "$line"; then
-      log "SSH_TUNNELS 目标无效: ${line}"
+      log "invalid SSH_TUNNELS target: ${line}"
       return 2
     fi
     targets+=("$line")
@@ -287,33 +287,33 @@ activate_tunnel_user() {
       upsert_sshd_tunnel /etc/ssh/sshd_config ""
     fi
     if [[ "$rc" -eq 2 ]]; then
-      log "warn: 隧道用户这次不启用。推理继续。"
+      log "warn: tunnel user not enabled this time. Inference continues."
     fi
     return 0
   fi
   if [[ ! -f /etc/ssh/sshd_config ]]; then
-    log "warn: 没有 /etc/ssh/sshd_config，隧道用户不启用。"
+    log "warn: no /etc/ssh/sshd_config, tunnel user not enabled."
     return 0
   fi
   upsert_sshd_tunnel /etc/ssh/sshd_config "$block"
   if [[ -x /usr/sbin/sshd ]] && ! /usr/sbin/sshd -t; then
-    log "warn: sshd 拒绝隧道配置，已撤回。"
+    log "warn: sshd rejected the tunnel config, rolled back."
     upsert_sshd_tunnel /etc/ssh/sshd_config ""
     return 0
   fi
   local user="${SSH_USER:-tunnel}"
   if ! ensure_tunnel_user "$user" "${SSH_PASSWORD:-}" "${SSH_USER_PUBLIC_KEY:-}"; then
-    log "warn: 建隧道用户失败。推理继续。"
+    log "warn: creating the tunnel user failed. Inference continues."
     upsert_sshd_tunnel /etc/ssh/sshd_config ""
     return 0
   fi
   local first
   first="$(tunnel_targets "${SSH_TUNNELS:-}" "${PROXY_PORT:-8898}")"
   first="${first%%$'\n'*}"
-  log "隧道用户 ${user} 已就绪，sudo 免密码。ssh ${user}@<主机> 之后 sudo -i。转发：ssh -N -L <本地端口>:${first} ${user}@<主机>"
+  log "tunnel user ${user} is ready, passwordless sudo. ssh ${user}@<host> then sudo -i. Forward: ssh -N -L <local-port>:${first} ${user}@<host>"
 }
 
-# Vast 在启动时注入公网地址和随机外部端口。没有这些变量时不记。
+# Vast injects the public address and random external ports at startup. Do not log when these variables are absent.
 log_vast_access() {
   local ip="${PUBLIC_IPADDR:-}" ssh_ext="${VAST_TCP_PORT_22:-}"
   local api_name="VAST_TCP_PORT_${PROXY_PORT:-8898}" api_ext=""
@@ -322,31 +322,31 @@ log_vast_access() {
   fi
   [[ -n "$ip" ]] || return 0
   if [[ -n "$ssh_ext" ]]; then
-    log "Vast SSH：ssh -p ${ssh_ext} root@${ip} 。root 只用账号公钥。密码登录是镜像内的用户，不是 root。"
+    log "Vast SSH: ssh -p ${ssh_ext} root@${ip} . root accepts only the account public key. Password login is for the in-image user, not root."
   fi
   if [[ -n "$api_ext" ]]; then
-    log "Vast API：http://${ip}:${api_ext} 对应容器端口 ${PROXY_PORT:-8898}。请求头 Authorization: Bearer，值是 API_TOKEN。这条映射是 HTTP。"
+    log "Vast API: http://${ip}:${api_ext} maps to container port ${PROXY_PORT:-8898}. Send header Authorization: Bearer with API_TOKEN as the value. This mapping is plain HTTP."
   fi
 }
 
 start_sshd_daemon() {
   mkdir -p /var/run/sshd
-  # 主机密钥按容器生成。打进镜像的话，所有拉取同一 tag 的机器会共用一把私钥。
+  # Host keys are generated per container. Baking them into the image would make every machine pulling the same tag share one private key.
   if command -v ssh-keygen >/dev/null 2>&1; then
-    ssh-keygen -A || log "warn: 没能生成 SSH 主机密钥。"
+    ssh-keygen -A || log "warn: could not generate SSH host keys."
   fi
   if [[ ! -x /usr/sbin/sshd ]]; then
-    log "warn: 镜像里没有 sshd。"
+    log "warn: no sshd in the image."
     return 0
   fi
   if ! /usr/sbin/sshd -t; then
-    log "warn: sshd 配置无效。"
+    log "warn: invalid sshd config."
     return 0
   fi
   if command -v pgrep >/dev/null 2>&1 && pgrep -x sshd >/dev/null 2>&1; then
-    # 只给最早的监听进程发 HUP。会话进程也叫 sshd，一起 HUP 会断掉已连上的 SSH。
+    # HUP only the oldest listening process. Session processes are also named sshd, and HUPing them would drop connected SSH sessions.
     pkill -HUP -o -x sshd || true
-    log "sshd 已在运行，已重新加载。现在可以连 22。"
+    log "sshd already running, reloaded. Port 22 is reachable now."
     return 0
   fi
   (
@@ -363,14 +363,14 @@ start_sshd_daemon() {
         fails=0
       fi
       if ((fails >= 3)); then
-        log "warn: sshd 连续启动失败。若 22 已被占用，沿用已有的 sshd。"
+        log "warn: sshd failed to start repeatedly. If port 22 is already taken, keep using the existing sshd."
         exit 0
       fi
-      log "warn: sshd 退出，状态 ${status:-0}，1 秒后重启"
+      log "warn: sshd exited with status ${status:-0}, restarting in 1 second"
       sleep 1
     done
   ) &
-  log "sshd 已在后台监听 22。模型还在加载时就可以连。"
+  log "sshd is listening on 22 in the background. You can connect while the model is still loading."
 }
 
 publish_runtime_env() {
@@ -400,17 +400,17 @@ choose_gpu_split() {
     return 0
   fi
   if [[ ! "$free_gib" =~ ^[0-9]+$ ]]; then
-    log "无法读取显存空闲 GiB: ${free_gib}"
+    log "cannot read free GiB: ${free_gib}"
     return 1
   fi
-  # Weschera serve.sh 固定 -gs 112。空闲不够时由调用方警告，不改这个切分。
+  # Weschera serve.sh fixes -gs at 112. If free memory is insufficient the caller warns; this split is not changed.
   printf '112\n'
 }
 
-# 新内核（如 6.17.0-1026）的 GB10 MemTotal 约 119.6 GiB，比旧内核少 2 GiB。fork 默认给系统留 8 GiB 时，
-# 这类机器首次加载可能报 Insufficient VRAM，加载成功后第一个请求的 MTP 词表镜像（1.18 GiB）也会 OOM。
-# 实测留 6 GiB：20 万 token、6 万 token 加 3 张图都通过，系统 MemAvailable 最低仍有 2.5 GiB；留 5 GiB 时只剩 0.55 GiB。
-# 输出空表示沿用 fork 默认（8192）。
+# On newer kernels (e.g. 6.17.0-1026) GB10 MemTotal is ~119.6 GiB, 2 GiB less than on older kernels. With the fork default of 8 GiB left for the system,
+# such machines may report Insufficient VRAM on first load, and after a successful load the first request's MTP vocab mirror (1.18 GiB) can also OOM.
+# Measured with 6 GiB reserved: 200K tokens, and 60K tokens plus 3 images, both pass, with system MemAvailable at least 2.5 GiB; with 5 GiB reserved only 0.55 GiB was left.
+# Empty output keeps the fork default (8192).
 choose_uma_reserve() {
   local explicit="$1" mem_total_kib="$2"
   if [[ -n "$explicit" ]]; then
@@ -423,11 +423,11 @@ choose_uma_reserve() {
 split_warning() {
   local gs="$1" cache="$2"
   if ((cache >= 262144 && gs < 108)); then
-    printf '切分 %s GiB 低于 256K 加载成功时的 110。空闲显存不够时这次上下文会加载失败。\n' "$gs"
+    printf 'split %s GiB is below the 110 that loads 256K successfully. If free VRAM is insufficient this context size will fail to load.\n' "$gs"
   fi
 }
 
-# 结果写 VISION_ARGS。MAX_IMAGE_TOKENS 留空时不传，由上游处理器决定默认值。
+# The result goes into VISION_ARGS. When MAX_IMAGE_TOKENS is empty it is not passed and the upstream processor picks the default.
 vision_serve_args() {
   VISION_ARGS=()
   if [[ "$VISION" == 1 ]]; then
@@ -438,15 +438,15 @@ vision_serve_args() {
   fi
 }
 
-# 上游 serve.sh：加载前丢一次，加载过程中每 2 秒再丢，直到出现 Native API listening。
-# 必须在当前 shell 调用，结果写 DROPPER_PID。不能放进 $()，否则后台循环会随子 shell 退出。
+# Upstream serve.sh drops once before loading, then every 2 seconds during loading until Native API listening appears.
+# Must be called in the current shell; the result goes into DROPPER_PID. Do not put it in $(), or the background loop exits with the subshell.
 start_load_cache_dropper() {
   DROPPER_PID=""
   if ! echo 3 >/proc/sys/vm/drop_caches 2>/dev/null; then
-    log "warn: 容器内不能丢页缓存。上游 serve.sh 在加载前和加载中都会丢。切分仍用 112，不要把上下文降到 131072 当作唯一办法。"
+    log "warn: cannot drop page cache inside the container. Upstream serve.sh drops it before and during loading. The split stays at 112; do not treat lowering context to 131072 as the only fix."
     return 0
   fi
-  log "按上游 serve.sh，加载期间每 2 秒丢一次页缓存。"
+  log "following upstream serve.sh: dropping page cache every 2 seconds while loading."
   (
     local _
     for _ in $(seq 1 300); do
@@ -472,7 +472,7 @@ stop_load_cache_dropper() {
   kill "$dropper" 2>/dev/null || true
 }
 
-# 启动前校验，错在入口而不是等 easytier-core 静默连不上。
+# Validate before startup so the mistake shows at the entrypoint instead of easytier-core silently failing to connect.
 check_easytier_peers() {
   local item re='^(tcp|udp)://[^,[:space:]]+:[0-9]+$'
   local -a items=()
@@ -480,30 +480,30 @@ check_easytier_peers() {
   IFS=, read -ra items <<<"$1"
   for item in "${items[@]}"; do
     if [[ ! "$item" =~ $re ]]; then
-      log "EASYTIER_PEERS 项无效: ${item}。应为 tcp://host:port 或 udp://host:port，逗号分隔。"
+      log "invalid EASYTIER_PEERS item: ${item}. Expected tcp://host:port or udp://host:port, comma separated."
       return 1
     fi
   done
 }
 
-# 把 EASYTIER_* 映射成 easytier-core 的 ET_*。用户只认 EASYTIER_* 前缀，ET_* 不再读取。
-# 没有虚拟 IP 的节点只转发、不可达，所以 IPV4 留空时总是申请 DHCP。
+# Map EASYTIER_* to easytier-core's ET_*. Users only know the EASYTIER_* prefix; ET_* is no longer read.
+# A node without a virtual IP only forwards and is unreachable, so an empty IPV4 always requests DHCP.
 prepare_easytier() {
   local name="${EASYTIER_NETWORK_NAME:-}" secret="${EASYTIER_NETWORK_SECRET:-}"
-  # 旧容器重启时可能残留上一次的虚拟 IP，不先删会让横幅指向已失效的地址。
+  # On container restart a stale virtual IP from the previous run may remain; without deleting it the banner would point to a dead address.
   rm -f "${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}"
   if [[ -z "$name" && -z "$secret" ]]; then
-    log "EasyTier 未配置。走服务器 IP 和端口 ${PROXY_PORT:-8898}。"
+    log "EasyTier not configured. Use the server IP and port ${PROXY_PORT:-8898}."
     return 1
   fi
   if [[ -z "$name" || -z "$secret" ]]; then
-    log "warn: EasyTier 需要同时填写 EASYTIER_NETWORK_NAME 和 EASYTIER_NETWORK_SECRET，这次不启动。"
+    log "warn: EasyTier needs both EASYTIER_NETWORK_NAME and EASYTIER_NETWORK_SECRET, not starting this time."
     return 1
   fi
   export ET_NETWORK_NAME="$name" ET_NETWORK_SECRET="$secret"
   export ET_HOSTNAME="${EASYTIER_HOSTNAME:-redsnow}"
-  # warn 级别也会刷屏：死 TCP peer 每 3 秒一条 connector::manual 重连失败，死 UDP peer 每 3 秒两条 tunnel::udp，
-  # 虚拟 IP 监视每次调 easytier-cli 还有一条 bidirect "read aborted"。只留 error，入网、换 IP、掉线由 watch_easytier_vip 报告。
+  # warn level also floods: a dead TCP peer logs one connector::manual reconnect failure every 3 s, a dead UDP peer two tunnel::udp lines every 3 s,
+  # and each easytier-cli call by the virtual IP watcher adds a bidirect "read aborted". Keep error only; joining, IP change and drop are reported by watch_easytier_vip.
   export ET_CONSOLE_LOG_LEVEL=error
   if [[ "${EASYTIER_PRIVATE_MODE:-1}" == 1 ]]; then
     export ET_PRIVATE_MODE=true
@@ -518,15 +518,15 @@ prepare_easytier() {
   else
     export ET_DHCP=true
   fi
-  # 容器没有 /dev/net/tun 和 CAP_NET_ADMIN，只能 no-tun。
+  # The container has no /dev/net/tun or CAP_NET_ADMIN, so no-tun is the only option.
   if ! have_tun; then
-    log "warn: 没有 /dev/net/tun，EasyTier 走 no-tun。同网节点经虚拟 IP 访问 ${PROXY_PORT:-8898}。"
+    log "warn: no /dev/net/tun, EasyTier runs in no-tun mode. Peers on the same network reach ${PROXY_PORT:-8898} via the virtual IP."
     export ET_NO_TUN=true
   fi
   return 0
 }
 
-# easytier-cli 输出 JSON，节点的 ipv4_addr 形如 10.144.144.1/24，这里去掉掩码。
+# easytier-cli outputs JSON; a node's ipv4_addr looks like 10.144.144.1/24 and the mask is stripped here.
 easytier_vip() {
   local out re='"ipv4_addr"[[:space:]]*:[[:space:]]*"([0-9.]+)/[0-9]+"'
   out="$(easytier-cli -o json node 2>/dev/null)" || return 1
@@ -537,31 +537,31 @@ easytier_vip() {
 start_auth_proxy() {
   local host="$1"
   PROXY_HOST="$host" nohup python3 /opt/redsnow/auth_proxy.py >/proc/1/fd/2 2>&1 &
-  log "认证代理 pid=$! 监听 ${host}:${PROXY_PORT} 上游 ${UPSTREAM}"
+  log "auth proxy pid=$! listening on ${host}:${PROXY_PORT} upstream ${UPSTREAM}"
 }
 
-# 只指向认证代理 PROXY_PORT，绝不指向推理端口。匿名地址写到 TUNNEL_URL_FILE，方便 cat，不用翻日志。
+# Points only at the auth proxy PROXY_PORT, never at the inference port. The anonymous URL is written to TUNNEL_URL_FILE so it can be cat'ed instead of digging through logs.
 start_cloudflared() {
   [[ "$CF_TUNNEL" == 1 ]] || return 0
   if ! command -v cloudflared >/dev/null 2>&1; then
-    log "warn: 镜像里没有 cloudflared，公网隧道不启动。"
+    log "warn: no cloudflared in the image, public tunnel not started."
     return 0
   fi
   local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}"
   mkdir -p "$(dirname "$url_file")"
   rm -f "$url_file"
-  # token 只进子进程环境变量，不放命令行参数，不写日志。
+  # The token goes only into the child process environment, not command-line arguments or logs.
   if [[ -n "${CF_TUNNEL_TOKEN:-}" ]]; then
-    log "Cloudflare 具名隧道启动。公网主机名在 Cloudflare 控制台配置，服务地址要填 http://localhost:${PROXY_PORT}。"
+    log "Cloudflare named tunnel started. Configure the public hostname in the Cloudflare dashboard with service URL http://localhost:${PROXY_PORT}."
     (
       status=0
       TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" cloudflared tunnel --no-autoupdate run 2>&1 \
         | while IFS= read -r line; do printf '%s\n' "$line" >&2; done || status=$?
-      log "warn: cloudflared 退出 status=${status}"
+      log "warn: cloudflared exited status=${status}"
     ) &
     return 0
   fi
-  log "Cloudflare 匿名隧道启动，正在申请公网地址。"
+  log "Cloudflare quick tunnel started, requesting a public URL."
   (
     status=0
     url=""
@@ -571,13 +571,13 @@ start_cloudflared() {
           if [[ -z "$url" && "$line" =~ https://[A-Za-z0-9-]+\.trycloudflare\.com ]]; then
             url="${BASH_REMATCH[0]}"
             printf '%s\n' "$url" >"$url_file"
-            log_banner "Cloudflare 公网地址" \
-              "公网  ${url}" \
-              "鉴权  请求头 Authorization: Bearer，值是 API_TOKEN" \
-              "只用串流请求，非串流超过 100 秒会被 Cloudflare 返回 524"
+            log_banner "Cloudflare public URL" \
+              "Public  ${url}" \
+              "Auth    header Authorization: Bearer, value is API_TOKEN" \
+              "Use streaming requests only; non-streaming requests over 100 s get 524 from Cloudflare"
           fi
         done || status=$?
-    log "warn: cloudflared 退出 status=${status}"
+    log "warn: cloudflared exited status=${status}"
   ) &
 }
 
@@ -585,15 +585,15 @@ start_easytier() {
   nohup easytier-core >/proc/1/fd/2 2>&1 &
   local pid=$!
   if [[ -n "${EASYTIER_PEERS:-}" ]]; then
-    log "EasyTier 启动 pid=${pid}，peer: ${EASYTIER_PEERS}"
+    log "EasyTier started pid=${pid}, peer: ${EASYTIER_PEERS}"
   else
-    log "EasyTier 启动 pid=${pid}。EASYTIER_PEERS 留空时只等别人来连。"
+    log "EasyTier started pid=${pid}. With EASYTIER_PEERS empty it only waits for others to connect."
   fi
   watch_easytier_vip &
 }
 
-# 常驻轮询：DHCP 要等同网节点连上才分配，晚入网、换 IP、掉线都要跟上，所以不能只等一次。
-# 只在 IP 变化时写文件、打横幅，避免每轮刷日志。EASYTIER_WATCH_INTERVAL 只为测试能调快。
+# Resident poll: DHCP assigns only after a same-network node connects, so late joins, IP changes and drops all need to be followed; one check is not enough.
+# Write the file and print the banner only when the IP changes, to avoid logging every round. EASYTIER_WATCH_INTERVAL exists only so tests can speed it up.
 watch_easytier_vip() {
   local ip="" last="" file="${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}"
   local interval="${EASYTIER_WATCH_INTERVAL:-5}" began=$SECONDS seen=0 warned=0
@@ -603,24 +603,24 @@ watch_easytier_vip() {
       mkdir -p "$(dirname "$file")"
       printf '%s\n' "$ip" >"$file"
       seen=1
-      log_banner "EasyTier 已入网" \
-        "虚拟 IP  ${ip}" \
-        "接入    http://${ip}:${PROXY_PORT}/v1（同网节点访问，带 Bearer）"
+      log_banner "EasyTier joined" \
+        "Virtual IP  ${ip}" \
+        "Access     http://${ip}:${PROXY_PORT}/v1 (for peers on the same network, with Bearer)"
       last="$ip"
     elif [[ -z "$ip" && -n "$last" ]]; then
       rm -f "$file"
-      log "warn: EasyTier 虚拟 IP 丢失，等待重新入网"
+      log "warn: EasyTier virtual IP lost, waiting to rejoin"
       last=""
     fi
     if [[ "$seen" == 0 && "$warned" == 0 ]] && (( SECONDS - began >= 60 )); then
       warned=1
-      log "warn: 60 秒内没有拿到 EasyTier 虚拟 IP。DHCP 要先连上至少一个同网节点才会分配；检查 EASYTIER_PEERS 和网络密钥。认证代理仍在 0.0.0.0:${PROXY_PORT}。"
+      log "warn: no EasyTier virtual IP within 60 seconds. DHCP assigns one only after at least one same-network node connects; check EASYTIER_PEERS and the network secret. The auth proxy is still on 0.0.0.0:${PROXY_PORT}."
     fi
     sleep "$interval"
   done
 }
 
-# 标题用等号框起来，方便在长日志里找到公网地址和就绪信息。
+# Frame the title with equals signs so the public URL and ready info are easy to find in a long log.
 log_banner() {
   local title="$1" row
   shift
@@ -631,8 +631,8 @@ log_banner() {
   log "========================================"
 }
 
-# 接入说明整段复制给 AI，所以地址和示例都填好，只留 <API_TOKEN> 给用户补。
-# 隧道优先于 Vast 直连，因为隧道是 HTTPS，Vast 映射是 HTTP 明文。鉴权行带字面量，真实 token 不进日志。没有的项不输出。
+# The connection block is copied whole to an AI, so the URL and example are filled in and only <API_TOKEN> is left for the user.
+# The tunnel takes priority over Vast direct because the tunnel is HTTPS and the Vast mapping is plain HTTP. The auth line carries a literal, so the real token never enters the log. Absent items are not printed.
 connect_lines() {
   local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}" tunnel_url=""
   local ip_file="${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}"
@@ -651,47 +651,47 @@ connect_lines() {
     base="${tunnel_url}/v1"
     tunnel=1
   elif [[ "${CF_TUNNEL:-}" == 1 && -n "${CF_TUNNEL_TOKEN:-}" ]]; then
-    base="https://<你在 Cloudflare 配置的主机名>/v1"
+    base="https://<hostname configured in Cloudflare>/v1"
     tunnel=1
   elif [[ -n "$vast" ]]; then
     base="$vast"
   else
-    base="http://<服务器地址>:${PROXY_PORT:-8898}/v1"
+    base="http://<server address>:${PROXY_PORT:-8898}/v1"
   fi
-  caps="文本、工具调用（tools/tool_choice）、response_format json_object/json_schema"
+  caps="text, tool calls (tools/tool_choice), response_format json_object/json_schema"
   if [[ "${VISION:-}" == 1 ]]; then
-    caps+="、图片（image_url，data:image base64 或 http(s) URL）"
+    caps+=", images (image_url, data:image base64 or http(s) URL)"
   fi
-  body='{"model":"'"${SERVED_MODEL_NAME}"'","stream":true,"messages":[{"role":"user","content":"你好"}]}'
-  echo "协议      OpenAI Chat Completions 兼容"
+  body='{"model":"'"${SERVED_MODEL_NAME}"'","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+  echo "Protocol  OpenAI Chat Completions compatible"
   echo "Base URL  ${base}"
   if [[ "$tunnel" == 1 && -n "$vast" ]]; then
-    echo "备用 URL  ${vast}（Vast 直连，HTTP 明文）"
+    echo "Fallback  ${vast} (Vast direct, plain HTTP)"
   fi
   if [[ -s "$ip_file" ]]; then
-    echo "EasyTier  http://$(head -n 1 "$ip_file"):${PROXY_PORT:-8898}/v1（同网节点）"
+    echo "EasyTier  http://$(head -n 1 "$ip_file"):${PROXY_PORT:-8898}/v1 (peers on the same network)"
   fi
-  echo "模型      ${SERVED_MODEL_NAME}"
-  echo "鉴权      请求头 Authorization: Bearer <API_TOKEN>"
-  echo "上下文    ${CACHE_SIZE} tok，输入加 max_tokens 超过会返回 400"
-  echo "并发      ${MAX_ACTIVE_REQUESTS} 个请求同时生成，其余排队"
-  echo "建议      max_tokens 不超过 32000，对话超过 $((CACHE_SIZE - 32768)) tok 就压缩或截断"
+  echo "Model     ${SERVED_MODEL_NAME}"
+  echo "Auth      header Authorization: Bearer <API_TOKEN>"
+  echo "Context   ${CACHE_SIZE} tok; input plus max_tokens beyond this returns 400"
+  echo "Slots     ${MAX_ACTIVE_REQUESTS} concurrent request(s) generate; the rest queue"
+  echo "Advice    keep max_tokens at or below 32000; compact or truncate the conversation beyond $((CACHE_SIZE - 32768)) tok"
   if [[ "$tunnel" == 1 ]]; then
-    echo "串流      必须 stream: true，非串流超过 100 秒会被 Cloudflare 返回 524"
+    echo "Stream    stream: true is required; non-streaming requests over 100 s get 524 from Cloudflare"
   else
-    echo "串流      推荐 stream: true"
+    echo "Stream    stream: true recommended"
   fi
-  echo "能力      ${caps}"
-  echo "不支持    n>1、logprobs"
-  echo "接口      GET /v1/models，POST /v1/chat/completions"
-  echo "示例      curl -N ${base}/chat/completions -H 'Authorization: Bearer <API_TOKEN>' -H 'Content-Type: application/json' -d '${body}'"
+  echo "Features  ${caps}"
+  echo "Limits    n>1 and logprobs are not supported"
+  echo "Endpoints GET /v1/models, POST /v1/chat/completions"
+  echo "Example   curl -N ${base}/chat/completions -H 'Authorization: Bearer <API_TOKEN>' -H 'Content-Type: application/json' -d '${body}'"
 }
 
-# 就绪横幅只保留 Vast SSH 一行，其它访问信息已由 connect_lines 给出。
+# The ready banner keeps only the Vast SSH line; connect_lines already gives all other access info.
 access_lines() {
   local ip="${PUBLIC_IPADDR:-}" ssh_ext="${VAST_TCP_PORT_22:-}"
   if [[ -n "$ip" && -n "$ssh_ext" ]]; then
-    echo "Vast SSH  ssh -p ${ssh_ext} root@${ip}（root 只认账号公钥，密码登录用隧道用户）"
+    echo "Vast SSH  ssh -p ${ssh_ext} root@${ip} (root accepts only the account public key; use the tunnel user for password login)"
   fi
 }
 
@@ -701,7 +701,7 @@ json_num() {
   printf '%s\n' "${BASH_REMATCH[1]}"
 }
 
-# 上游每个请求结束打印一行 usage JSON。字段缺任何一个返回 1，调用方原样输出那行。
+# Upstream prints one usage JSON line when each request ends. Returns 1 if any field is missing, and the caller prints that line unchanged.
 usage_summary() {
   local line="$1" reason pt ct dts da tp te
   local re_reason='"finish_reason":"([^"]*)"'
@@ -717,13 +717,13 @@ usage_summary() {
     -v da="$da" -v tp="$tp" -v te="$te" '
   BEGIN {
     rate = ""
-    if (tp + 0 > 0) rate = sprintf("（%d tok/s）", pt / tp + 0.5)
-    printf "请求完成 %s｜输入 %d tok 预填 %.2f s%s｜输出 %d tok 解码 %.1f tok/s｜MTP 接受 %.0f%%｜排队 %.2f s",
+    if (tp + 0 > 0) rate = sprintf(" (%d tok/s)", pt / tp + 0.5)
+    printf "request done %s | in %d tok prefill %.2f s%s | out %d tok decode %.1f tok/s | MTP accept %.0f%% | queued %.2f s",
       reason, pt, tp, rate, ct, dts, da * 100, te
   }'
 }
 
-# 推理的 stdout/stderr 经 tail 进入这里：usage 行压成一行，加载期的 Mixed-K 噪音只留层进度，Native API 就绪时打印访问信息。
+# The inference stdout/stderr comes in here via tail: usage lines are squashed into one line, load-time Mixed-K noise keeps only layer progress, and access info is printed when Native API is ready.
 format_serve_output() {
   local line summary start_at=$SECONDS
   local re_layer='^ -- Mixed-K experts in model\.language_model\.layers\.([0-9]+)\.'
@@ -738,16 +738,16 @@ format_serve_output() {
         ;;
       " -- Mixed-K "*)
         if [[ "$line" =~ $re_layer ]] && ((10#${BASH_REMATCH[1]} % 10 == 0)); then
-          log "加载权重 第 ${BASH_REMATCH[1]} 层"
+          log "loading weights layer ${BASH_REMATCH[1]}"
         fi
         ;;
       *"Native API listening"*)
         printf '%s\n' "$line" >&2
-        rows=("加载用时 $((SECONDS - start_at)) 秒")
+        rows=("load time $((SECONDS - start_at)) s")
         while IFS= read -r row; do
           rows+=("$row")
         done < <(connect_lines; access_lines)
-        log_banner "模型就绪：接入信息（整段复制给 AI，只需补 API_TOKEN）" "${rows[@]}"
+        log_banner "Model ready: connection info (copy this block to an AI; only API_TOKEN needs filling in)" "${rows[@]}"
         ;;
       *)
         printf '%s\n' "$line" >&2
@@ -756,7 +756,7 @@ format_serve_output() {
   done
 }
 
-# 一行运行指标。nvidia-smi 缺失或失败时省略 GPU 段；上游 /health 不通写推理未就绪。
+# One line of runtime metrics. The GPU segment is omitted when nvidia-smi is missing or fails; if upstream /health is unreachable it says inference is not ready.
 metrics_line() {
   local url_file="${TUNNEL_URL_FILE:-/run/redsnow/tunnel_url}" meminfo="${MEMINFO:-/proc/meminfo}"
   local ip_file="${EASYTIER_IP_FILE:-/run/redsnow/easytier_ip}"
@@ -767,26 +767,26 @@ metrics_line() {
         printf "GPU %s%% %s°C %.0f W SM %s MHz", $1, $2, $3, $4 }')" || true
   if [[ -r "$meminfo" ]]; then
     mem="$(awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 }
-      END { if (t > 0 && a > 0) printf "内存可用 %.1f/%.1f GiB", a / 1048576, t / 1048576 }' "$meminfo")"
+      END { if (t > 0 && a > 0) printf "mem avail %.1f/%.1f GiB", a / 1048576, t / 1048576 }' "$meminfo")"
   fi
   body="$(curl -fsS --max-time 2 "http://127.0.0.1:${SERVE_PORT:-8899}/health" 2>/dev/null)" || body=""
   if [[ -z "$body" ]]; then
-    health="推理未就绪"
+    health="inference not ready"
   elif [[ "$body" =~ $re_requests ]]; then
-    health="进行中请求 ${BASH_REMATCH[1]}"
+    health="active ${BASH_REMATCH[1]}"
   fi
   if [[ -s "$ip_file" ]]; then
     et="EasyTier $(head -n 1 "$ip_file")"
   fi
   if [[ -s "$url_file" ]]; then
     url="$(head -n 1 "$url_file")"
-    public="公网 ${url}"
+    public="public ${url}"
   fi
   for seg in "$gpu" "$mem" "$health" "$et" "$public"; do
     [[ -n "$seg" ]] || continue
-    out="${out:+${out}｜}${seg}"
+    out="${out:+${out} | }${seg}"
   done
-  printf '指标 %s\n' "$out"
+  printf 'metrics %s\n' "$out"
 }
 
 start_metrics_loop() {
@@ -805,11 +805,11 @@ start_metrics_loop() {
 
 main() {
   if [[ $# -gt 0 ]]; then
-    log "忽略启动引数。上下文和显存切分请用环境变量 CACHE_SIZE、GPU_SPLIT_GB。"
+    log "ignoring startup arguments. Set context and VRAM split with the environment variables CACHE_SIZE and GPU_SPLIT_GB."
   fi
 
-  : "${API_TOKEN:?需要环境变量 API_TOKEN}"
-  log "启动 version=${IMAGE_VERSION:-unknown}。API_TOKEN 已设置。"
+  : "${API_TOKEN:?API_TOKEN environment variable is required}"
+  log "starting version=${IMAGE_VERSION:-unknown}. API_TOKEN is set."
 
   CACHE_SIZE="${CACHE_SIZE:-262144}"
   NUM_DRAFT_TOKENS="${NUM_DRAFT_TOKENS:-2}"
@@ -824,60 +824,60 @@ main() {
   MODEL_REVISION="${MODEL_REVISION:-$MODEL_REVISION_DEFAULT}"
   MODEL_DOWNLOAD="${MODEL_DOWNLOAD:-1}"
   MODEL_DOWNLOAD_WORKERS="${MODEL_DOWNLOAD_WORKERS:-8}"
-  # -ambs 让 exllamav3 加载时按同一批大小预留内存，所以它必须不小于并发槽位数，这里用同一个值。
+  # -ambs makes exllamav3 reserve memory for the same batch size at load time, so it must be at least the number of concurrent slots; use the same value here.
   MAX_ACTIVE_REQUESTS="${MAX_ACTIVE_REQUESTS:-1}"
   EASYTIER_PRIVATE_MODE="${EASYTIER_PRIVATE_MODE:-1}"
   export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-/usr/local/cuda/bin/ptxas}"
-  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} 下载线程=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-处理器默认} CF_TUNNEL=${CF_TUNNEL} METRICS_INTERVAL=${METRICS_INTERVAL}"
-  log "模型目录 $(locked_model_dir) 仓库 ${MODEL_REPO} 修订 ${MODEL_REVISION}"
+  log "CACHE_SIZE=${CACHE_SIZE} NUM_DRAFT_TOKENS=${NUM_DRAFT_TOKENS} MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} PROXY_PORT=${PROXY_PORT} SERVE_PORT=${SERVE_PORT} PROXY_TIMEOUT=${PROXY_TIMEOUT} MODEL_DOWNLOAD=${MODEL_DOWNLOAD} download_workers=${MODEL_DOWNLOAD_WORKERS} VISION=${VISION} MAX_IMAGE_TOKENS=${MAX_IMAGE_TOKENS:-processor default} CF_TUNNEL=${CF_TUNNEL} METRICS_INTERVAL=${METRICS_INTERVAL}"
+  log "model dir $(locked_model_dir) repo ${MODEL_REPO} revision ${MODEL_REVISION}"
 
   case "$VISION" in
     0 | 1) ;;
     *)
-      log "VISION 只能是 0 或 1，当前是 ${VISION}"
+      log "VISION must be 0 or 1, got ${VISION}"
       exit 1
       ;;
   esac
   if [[ -n "$MAX_IMAGE_TOKENS" && ! "$MAX_IMAGE_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
-    log "MAX_IMAGE_TOKENS 必须是正整数，当前是 ${MAX_IMAGE_TOKENS}"
+    log "MAX_IMAGE_TOKENS must be a positive integer, got ${MAX_IMAGE_TOKENS}"
     exit 1
   fi
   case "$CF_TUNNEL" in
     0 | 1) ;;
     *)
-      log "CF_TUNNEL 只能是 0 或 1，当前是 ${CF_TUNNEL}"
+      log "CF_TUNNEL must be 0 or 1, got ${CF_TUNNEL}"
       exit 1
       ;;
   esac
   if [[ ! "$METRICS_INTERVAL" =~ ^[0-9]+$ ]]; then
-    log "METRICS_INTERVAL 必须是非负整数，当前是 ${METRICS_INTERVAL}"
+    log "METRICS_INTERVAL must be a non-negative integer, got ${METRICS_INTERVAL}"
     exit 1
   fi
   if [[ ! "$MAX_ACTIVE_REQUESTS" =~ ^[1-9][0-9]*$ ]]; then
-    log "MAX_ACTIVE_REQUESTS 必须是正整数，当前是 ${MAX_ACTIVE_REQUESTS}"
+    log "MAX_ACTIVE_REQUESTS must be a positive integer, got ${MAX_ACTIVE_REQUESTS}"
     exit 1
   fi
-  # 实测：缓存池大于 131072 时多个长提示会同时预填，2×60K 起就 CUDA OOM；131072 时池子把大部分预填错开。
+  # Measured: with a cache pool above 131072 several long prompts prefill at once, and 2x60K already hits CUDA OOM; at 131072 the pool staggers most prefills.
   if (( MAX_ACTIVE_REQUESTS > 1 )) && [[ "$CACHE_SIZE" =~ ^[0-9]+$ ]] && (( CACHE_SIZE > 131072 )); then
-    log "warn: MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} 配 CACHE_SIZE=${CACHE_SIZE} 未通过长提示测试，多个长请求同时预填会 OOM（单个请求返回 503）。多槽建议 CACHE_SIZE=131072 NUM_DRAFT_TOKENS=1。"
+    log "warn: MAX_ACTIVE_REQUESTS=${MAX_ACTIVE_REQUESTS} with CACHE_SIZE=${CACHE_SIZE} has not passed the long-prompt test; several long requests prefilling at once will OOM (the single request gets 503). For multiple slots use CACHE_SIZE=131072 NUM_DRAFT_TOKENS=1."
   fi
   case "$EASYTIER_PRIVATE_MODE" in
     0 | 1) ;;
     *)
-      log "EASYTIER_PRIVATE_MODE 只能是 0 或 1，当前是 ${EASYTIER_PRIVATE_MODE}"
+      log "EASYTIER_PRIVATE_MODE must be 0 or 1, got ${EASYTIER_PRIVATE_MODE}"
       exit 1
       ;;
   esac
   check_easytier_peers "${EASYTIER_PEERS:-}" || exit 1
 
-  # 22 先起来。后面的下载和加载都不挡 SSH。
+  # Start 22 first. Neither the download nor the load below blocks SSH.
   install_ssh_pubkey "${SSH_PUBLIC_KEY:-}" /root/.ssh/authorized_keys
   fix_root_ssh_perms /root/.ssh
   activate_tunnel_user
   start_sshd_daemon
 
   if [[ ! -x "$TRITON_PTXAS_PATH" ]]; then
-    log "找不到 ptxas: ${TRITON_PTXAS_PATH}"
+    log "ptxas not found: ${TRITON_PTXAS_PATH}"
     exit 1
   fi
   log "ptxas ${TRITON_PTXAS_PATH}"
@@ -889,7 +889,7 @@ main() {
   export UPSTREAM="http://127.0.0.1:${SERVE_PORT}"
   export PROXY_PORT API_TOKEN PROXY_TIMEOUT
   start_auth_proxy 0.0.0.0
-  log "用服务器 IP 和端口 ${PROXY_PORT} 访问。请求头 Authorization: Bearer，值是 API_TOKEN。不要访问 ${SERVE_PORT}，那里没有鉴权。"
+  log "Use the server IP and port ${PROXY_PORT}. Send header Authorization: Bearer with API_TOKEN as the value. Do not use ${SERVE_PORT}; it has no auth."
   log_vast_access
   start_cloudflared
   start_metrics_loop
@@ -901,7 +901,7 @@ main() {
   local model_rc=0
   MODEL_DIR="$(ensure_model_dir)" || model_rc=$?
   if [[ "$model_rc" -eq 2 ]]; then
-    log "推理未启动。sshd 和认证代理继续。"
+    log "inference not started. sshd and the auth proxy continue."
     wait || true
     exit 0
   fi
@@ -910,7 +910,7 @@ main() {
   fi
   export MODEL_DIR
   publish_runtime_env /etc/environment MODEL_DIR
-  log "推理将使用模型目录 ${MODEL_DIR}"
+  log "inference will use model dir ${MODEL_DIR}"
 
   local free_gib gs warning serve_status=0 serve_log tail_pid
   free_gib="$(read_free_gib)"
@@ -919,25 +919,25 @@ main() {
   if [[ -n "$warning" ]]; then
     log "warn: ${warning}"
   fi
-  # EXL3_UMA=1 时 exllamav3 按 MemAvailable 算余量，页缓存会被回收，这里读到的空闲偏低不代表会失败。
+  # With EXL3_UMA=1 exllamav3 computes headroom from MemAvailable and page cache is reclaimed, so a low free reading here does not mean failure.
   if [[ "${EXL3_UMA:-}" != 1 ]] && (( free_gib < gs + 2 )); then
-    log "warn: 空闲 ${free_gib} GiB，上游 serve.sh 仍用 -gs ${gs}。页缓存占满时这次加载会失败。"
+    log "warn: ${free_gib} GiB free, upstream serve.sh still uses -gs ${gs}. If page cache fills memory this load will fail."
   fi
   local mem_total_kib uma_reserve
   mem_total_kib="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
   uma_reserve="$(choose_uma_reserve "${EXL3_UMA_RESERVE_MB:-}" "$mem_total_kib")"
   if [[ -n "$uma_reserve" ]]; then
     export EXL3_UMA_RESERVE_MB="$uma_reserve"
-    log "MemTotal $((mem_total_kib / 1048576)) GiB，EXL3_UMA_RESERVE_MB=${uma_reserve}（给系统留的内存，fork 默认 8192）。"
+    log "MemTotal $((mem_total_kib / 1048576)) GiB, EXL3_UMA_RESERVE_MB=${uma_reserve} (memory kept for the system; fork default 8192)."
   fi
-  log "GPU_SPLIT_GB=${gs} CACHE_SIZE=${CACHE_SIZE} 空闲显存约 ${free_gib} GiB"
+  log "GPU_SPLIT_GB=${gs} CACHE_SIZE=${CACHE_SIZE} free VRAM about ${free_gib} GiB"
   start_load_cache_dropper
   GPU_SPLIT_GB="$gs"
   publish_runtime_env /etc/environment GPU_SPLIT_GB
 
   serve_log="$(mktemp)"
   vision_serve_args
-  log "启动推理，参数对齐上游 serve.sh：-m ${MODEL_DIR} -gs ${gs} --cache_size ${CACHE_SIZE} --cache_quant 4 --mtp --num_draft_tokens ${NUM_DRAFT_TOKENS} --max-model-len ${CACHE_SIZE} --max-active-requests ${MAX_ACTIVE_REQUESTS} -ambs ${MAX_ACTIVE_REQUESTS} --port ${SERVE_PORT} ${VISION_ARGS[*]}"
+  log "starting inference, args aligned with upstream serve.sh: -m ${MODEL_DIR} -gs ${gs} --cache_size ${CACHE_SIZE} --cache_quant 4 --mtp --num_draft_tokens ${NUM_DRAFT_TOKENS} --max-model-len ${CACHE_SIZE} --max-active-requests ${MAX_ACTIVE_REQUESTS} -ambs ${MAX_ACTIVE_REQUESTS} --port ${SERVE_PORT} ${VISION_ARGS[*]}"
   python3 /opt/redsnow/server/serve_glm.py \
     -m "${MODEL_DIR}" \
     -gs "${gs}" \
@@ -958,10 +958,10 @@ main() {
   if [[ -n "${DROPPER_PID:-}" ]]; then
     stop_load_cache_dropper "$DROPPER_PID" "$serve_pid" "$serve_log" &
   fi
-  log "推理 pid=${serve_pid} 只监听 127.0.0.1:${SERVE_PORT}。对外是 0.0.0.0:${PROXY_PORT}。上游冷加载大约 4 到 6 分钟，权重已在页缓存里时大约一分钟。日志出现 Native API listening 后才能调用。"
+  log "inference pid=${serve_pid} listening on 127.0.0.1:${SERVE_PORT} only. Public side is 0.0.0.0:${PROXY_PORT}. A cold upstream load takes about 4 to 6 minutes, about one minute when the weights are already in page cache. Calls work only after Native API listening appears."
   wait "${serve_pid}" || serve_status=$?
   kill "$tail_pid" ${DROPPER_PID:+"$DROPPER_PID"} ${METRICS_PID:+"$METRICS_PID"} 2>/dev/null || true
-  log "推理进程退出 status=${serve_status}"
+  log "inference process exited status=${serve_status}"
   exit "${serve_status}"
 }
 

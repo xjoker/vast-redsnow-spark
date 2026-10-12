@@ -1,4 +1,4 @@
-name: 发布镜像
+name: Release image
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.3.0
 
-      - name: 登录 GHCR
+      - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -27,7 +27,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: 内核未变则跳过，否则构建并推送
+      - name: Skip if kernels unchanged, else build and push
         run: |
           set -euo pipefail
           exl3=$(grep -E '^ARG EXL3_REF=' Dockerfile.kernels | head -1 | cut -d= -f2-)
@@ -63,7 +63,7 @@ jobs:
             need=$(python3 -c 'import json,sys; labels=json.loads(sys.argv[1]) or {}; same=labels.get("redsnow.exl3_ref")==sys.argv[2] and labels.get("redsnow.base_image")==sys.argv[3]; print("0" if same else "1")' "${labels}" "${exl3}" "${base}")
           fi
           if [ "${need}" = "0" ]; then
-            echo "内核镜像标签未变，跳过构建"
+            echo "kernel image tag unchanged, skipping build"
             exit 0
           fi
           echo "=== before build ==="
@@ -98,17 +98,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      - name: 核对当天版本
+      - name: Check today's version
         id: version
         run: |
           version=$(tr -d '[:space:]' < VERSION)
           today=$(date -u +%Y%m%d)
           if ! [[ "$version" =~ ^${today}\.[1-9][0-9]*$ ]]; then
-            echo "VERSION=${version} 不是今天 UTC ${today} 的 YYYYMMDD.N。当天第一发是 .1，同日再发才递增。"
+            echo "VERSION=${version} is not a YYYYMMDD.N for today (UTC ${today}). The first release of the day is .1; only later releases the same day increment."
             exit 1
           fi
           echo "value=${version}" >> "$GITHUB_OUTPUT"
-      - name: 登录 GHCR
+      - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
@@ -116,11 +116,11 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-      - name: 构建并推送
+      - name: Build and push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
-          # 基础镜像的层也重压成 zstd：主机拉取时逐层单核解压，gzip 是首次启动最慢的一步。拉取端要 Docker 23+。
+          # Base image layers are also recompressed as zstd: hosts decompress layers one core at a time, and gzip is the slowest step of the first start. Pulling needs Docker 23+.
           outputs: type=image,push=true,compression=zstd,force-compression=true,oci-mediatypes=true
           no-cache: true
           platforms: linux/arm64
@@ -130,11 +130,11 @@ jobs:
           build-args: |
             IMAGE_VERSION=${{ steps.version.outputs.value }}
             GIT_COMMIT=${{ github.sha }}
-      - name: 打标签
+      - name: Tag
         run: |
           version="${{ steps.version.outputs.value }}"
           if git rev-parse "v${version}" >/dev/null 2>&1; then
-            echo "标签 v${version} 已存在"
+            echo "tag v${version} already exists"
             exit 1
           fi
           git tag "v${version}"

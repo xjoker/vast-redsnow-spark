@@ -266,13 +266,13 @@ def test_health_requests_are_not_logged():
 def test_unreachable_upstream_health_is_quiet():
     logged, statuses = _run_quiet_probe(1, ["/health", "/v1/models"])
     assert statuses == {"/health": 503, "/v1/models": 503}, statuses
-    assert "上游不可达 GET /v1/models" in logged, logged
-    assert "上游不可达 GET /health" not in logged, logged
+    assert "upstream unreachable GET /v1/models" in logged, logged
+    assert "upstream unreachable GET /health" not in logged, logged
     assert "/health" not in logged, logged
 
 
 def _serve_metrics(upstream_metrics, paths, token=None):
-    """起假上游（/metrics 返回给定文本；None 表示上游不可达）和代理，依次 GET paths。"""
+    """Start a fake upstream (/metrics returns the given text; None means unreachable) and the proxy, then GET paths in order."""
     import contextlib
     import io
     import threading
@@ -343,7 +343,7 @@ def test_metrics_merges_host_and_upstream():
     assert "redsnow_upstream_up 1\n" in body, body
     assert "redsnow_memory_available_bytes " in body or not os.path.exists("/proc/meminfo"), body
     assert 'redsnow_build_info{' in body, body
-    # 面板每两秒拉一次，不能刷访问日志。
+    # The dashboard polls every 2 s and must not flood the access log.
     assert "/metrics" not in logged, logged
 
 
@@ -410,7 +410,7 @@ def test_dashboard_served_without_token():
     status, ctype, body = results["/dashboard"]
     assert status == 200, results
     assert ctype.startswith("text/html"), ctype
-    assert "/metrics" in body, "面板要从 /metrics 取数"
+    assert "/metrics" in body, "dashboard must fetch data from /metrics"
     assert auth_proxy.TOKEN not in body
     assert "/dashboard" not in logged, logged
 

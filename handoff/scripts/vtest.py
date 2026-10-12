@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""视觉冒烟：本地画图（文字+色块），走 OpenAI image_url data URI，流式和非流式各一次。"""
+"""Vision smoke test: draw an image locally (text + color blocks), send it as an OpenAI image_url data URI, once streaming and once not."""
 import base64, io, json, sys, time, urllib.request
 from PIL import Image, ImageDraw, ImageFont
 

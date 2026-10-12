@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""用官方 openai SDK 逐项检查兼容性。用法: compat.py <base_url> <api_key>"""
+"""Check compatibility item by item with the official openai SDK. Usage: compat.py <base_url> <api_key>"""
 import base64, io, json, sys, traceback
 from openai import OpenAI, APIStatusError
 from PIL import Image, ImageDraw, ImageFont

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bearer 门。推理进程只听 127.0.0.1。这层默认听 0.0.0.0，请求必须带 API_TOKEN。"""
+"""Bearer gate. The inference process listens on 127.0.0.1 only; this layer listens on 0.0.0.0 by default and requires API_TOKEN on every request."""
 
 from __future__ import annotations
 
@@ -29,11 +29,11 @@ HEALTH_PATHS = {"/health", "/v1/health"}
 METRICS_PATH = "/metrics"
 DASHBOARD_PATH = "/dashboard"
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
-# 面板和 Prometheus 轮询的路径，记访问日志会刷屏。
+# Paths polled by the dashboard and Prometheus; logging them would flood the access log.
 QUIET_PATHS = HEALTH_PATHS | {METRICS_PATH, DASHBOARD_PATH}
 CPU_MODES = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal")
 GPU_QUERY = "utilization.gpu,temperature.gpu,power.draw,clocks.sm"
-# nvidia-smi 一次约百毫秒；面板和 Prometheus 同时拉时共用一份结果。
+# nvidia-smi takes ~100 ms per call; the dashboard and Prometheus share one cached result.
 GPU_CACHE_SECONDS = 2.0
 _gpu_cache = {"at": 0.0, "lines": []}
 _gpu_lock = threading.Lock()
@@ -59,7 +59,7 @@ def authorized(header: str) -> bool:
     return hmac.compare_digest(header, f"Bearer {TOKEN}")
 
 
-# 上游非 JSON 对象（或非 2xx 时调用方不会进来）原样返回，不替上游猜格式。
+# Non-JSON-object upstream bodies (callers never get here on non-2xx) are returned as-is; we do not guess the upstream format.
 def with_build_info(body: bytes) -> bytes:
     try:
         doc = json.loads(body)
@@ -81,7 +81,7 @@ def metric(name: str, kind: str, help_text: str, samples: list[tuple[str, object
     return out + "".join(f"{name}{labels} {value}\n" for labels, value in samples)
 
 
-# nvidia-smi --format=csv,noheader,nounits 的一行。GB10 上读不到的字段是 [N/A]，整组不输出。
+# One line of nvidia-smi --format=csv,noheader,nounits. Fields GB10 cannot read are [N/A]; the whole group is then omitted.
 def gpu_metrics(csv: str) -> list[str]:
     fields = [f.strip() for f in csv.strip().splitlines()[0].split(",")] if csv.strip() else []
     try:
@@ -119,7 +119,7 @@ def read_text(path: str) -> str | None:
         return None
 
 
-# 读不到的文件对应的指标直接不输出，不用 0 冒充。
+# Metrics whose source file is unreadable are omitted rather than reported as 0.
 def host_metrics(
     meminfo: str = "/proc/meminfo",
     stat: str = "/proc/stat",
@@ -172,7 +172,7 @@ def label_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
-# 上游 /metrics 不通时只少推理那一段，主机指标照常输出。
+# If upstream /metrics is unreachable only the inference section is missing; host metrics are still emitted.
 def metrics_text() -> str:
     parts = [
         metric("redsnow_build_info", "gauge", "Image build.", [(
@@ -196,7 +196,7 @@ def metrics_text() -> str:
 
 def check_bind_host(host: str) -> str:
     if host in {"::", ""}:
-        raise SystemExit(f"认证代理绑定地址无效: {host!r}")
+        raise SystemExit(f"invalid auth proxy bind address: {host!r}")
     return host
 
 
@@ -205,9 +205,9 @@ def proxy_timeout() -> int:
     try:
         value = int(raw)
     except ValueError as exc:
-        raise SystemExit(f"PROXY_TIMEOUT 不是整数: {raw}") from exc
+        raise SystemExit(f"PROXY_TIMEOUT is not an integer: {raw}") from exc
     if value < 1:
-        raise SystemExit(f"PROXY_TIMEOUT 必须为正: {value}")
+        raise SystemExit(f"PROXY_TIMEOUT must be positive: {value}")
     return value
 
 
@@ -215,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:
-        # 加载期健康检查每几秒一次，面板每两秒拉指标，不记会刷屏。
+        # The load-time health check runs every few seconds and the dashboard polls metrics every 2 s; logging them would flood the log.
         if urlsplit(getattr(self, "path", "")).path in QUIET_PATHS:
             return
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -241,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # 上游只有列表接口，单个模型只能从 /v1/models 的 data 里挑。
+    # Upstream only has the list endpoint, so a single model is picked from the data array of /v1/models.
     def get_model(self, model: str) -> None:
         try:
             with urllib.request.urlopen(
@@ -250,7 +250,7 @@ class Handler(BaseHTTPRequestHandler):
                 items = json.loads(upstream.read())["data"]
         except urllib.error.URLError as exc:
             sys.stderr.write(
-                "%s [redsnow] 上游不可达 GET %s: %s\n"
+                "%s [redsnow] upstream unreachable GET %s: %s\n"
                 % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), self.path, exc.reason)
             )
             self.reject(503, "model is still loading")
@@ -284,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def proxy(self) -> None:
         path = urlsplit(self.path).path
-        # 面板页面本身不含数据，浏览器里填 token 后再带 Bearer 拉 /metrics。
+        # The dashboard page itself contains no data; the browser asks for the token and then fetches /metrics with a Bearer header.
         if self.command == "GET" and path == DASHBOARD_PATH:
             with open(DASHBOARD_FILE, "rb") as handle:
                 self.send_body("text/html; charset=utf-8", handle.read())
@@ -328,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
         except urllib.error.URLError as exc:
             if not is_health_path(self.path):
                 sys.stderr.write(
-                    "%s [redsnow] 上游不可达 %s %s: %s\n"
+                    "%s [redsnow] upstream unreachable %s %s: %s\n"
                     % (
                         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         self.command,
@@ -355,7 +355,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", size)
         self.send_header("Connection", "close")
         self.end_headers()
-        # read 会凑满 65536 字节或 EOF 才返回，SSE 与 keepalive 会被攒住；read1 有多少转多少。
+        # read() blocks until 65536 bytes or EOF, which would hold back SSE and keepalives; read1() forwards whatever is available.
         while True:
             chunk = upstream.read1(65536)
             if not chunk:
@@ -372,17 +372,17 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     if not TOKEN:
-        raise SystemExit("需要环境变量 API_TOKEN")
+        raise SystemExit("API_TOKEN environment variable is required")
     host = check_bind_host(os.environ.get("PROXY_HOST", "0.0.0.0"))
     port = int(os.environ["PROXY_PORT"])
     sys.stderr.write(
-        "%s [redsnow] 认证代理监听 %s:%s 上游 %s\n"
+        "%s [redsnow] auth proxy listening on %s:%s upstream %s\n"
         % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), host, port, UPSTREAM)
     )
     try:
         ThreadingHTTPServer((host, port), Handler).serve_forever()
     except OSError as exc:
-        raise SystemExit(f"认证代理无法监听 {host}:{port}: {exc}") from exc
+        raise SystemExit(f"auth proxy cannot listen on {host}:{port}: {exc}") from exc
 
 
 if __name__ == "__main__":

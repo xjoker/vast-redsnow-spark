@@ -1,5 +1,5 @@
 #!/bin/bash
-# 用 /root/vserver 的服务层起推理。用法 vstart.sh [额外参数...]
+# Start inference with the server layer in /root/vserver. Usage: vstart.sh [extra args...]
 for p in $(pgrep -f "^/bin/bash /opt/redsnow/entrypoint.sh"); do kill $p; done
 pkill -f "^python3 /(opt/redsnow|root/vserver)/server/serve_glm.py|^python3 /root/vserver/serve_glm.py"
 while pgrep -f "^python3 /(opt/redsnow/server|root/vserver)/serve_glm.py" >/dev/null; do sleep 1; done

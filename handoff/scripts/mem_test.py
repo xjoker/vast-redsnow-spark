@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""内存边界测试：A（单张大图）、A2（三张大图）、B（视觉 + 长上下文）。只用标准库和 PIL。
-用法：python3 mem_test.py A|A2|B ；每项输出一行 JSON 到 stdout。"""
+"""Memory boundary test: A (one large image), A2 (three large images), B (vision + long context). Standard library and PIL only.
+Usage: python3 mem_test.py A|A2|B ; each case prints one JSON line to stdout."""
 import base64, io, json, os, random, sys, time, urllib.error, urllib.request
 from PIL import Image, ImageDraw, ImageFont
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""临时抓包：记录请求结构（长字符串截短）后原样转发到 8899。"""
+"""Temporary capture: log the request structure (long strings truncated), then forward unchanged to 8899."""
 import json, sys, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
